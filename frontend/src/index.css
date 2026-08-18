@@ -62,7 +62,7 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background font-sans text-foreground;
   }
 }
 
@@ -95,5 +95,39 @@
 @layer utilities {
   .animate-drift {
     animation: drift 26s ease-in-out infinite;
+  }
+}
+
+/* Pitch deck */
+@layer utilities {
+  .deck-gradient-text {
+    background: linear-gradient(90deg, #818cf8, #c084fc, #f0abfc, #e879f9, #818cf8);
+    background-size: 220% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: deck-gradient-shift 6s linear infinite;
+  }
+}
+
+@keyframes deck-gradient-shift {
+  to {
+    background-position: 220% center;
+  }
+}
+
+@keyframes deck-float {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-14px) scale(1.03);
+  }
+}
+
+@layer utilities {
+  .animate-float {
+    animation: deck-float 7s ease-in-out infinite;
   }
 }

@@ -6,6 +6,7 @@ import {
   X,
   PanelLeftClose,
   PanelLeftOpen,
+  MonitorPlay,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -13,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
-export type View = "dashboard" | "customers" | "analyses";
+export type View = "dashboard" | "customers" | "analyses" | "present";
 
 interface SidebarProps {
   view: View;
@@ -28,6 +29,7 @@ const navItems: { key: View; label: string; icon: typeof LayoutDashboard }[] = [
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "customers", label: "Customers", icon: Users },
   { key: "analyses", label: "Analyses", icon: BarChart3 },
+  { key: "present", label: "Present", icon: MonitorPlay },
 ];
 
 export function Sidebar({

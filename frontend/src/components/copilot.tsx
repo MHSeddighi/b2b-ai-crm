@@ -18,10 +18,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { CustomerTable } from "@/components/customer-table";
 import { getAgentResponse, delayResponse, type AgentResponse } from "@/lib/agent";
 import { suggestedQuestions } from "@/lib/mock-data";
+import { COPILOT_SCENARIOS, type CopilotScenario } from "@/lib/copilot-scenarios";
 import { formatCompact } from "@/lib/utils";
 import type { Kpi } from "@/lib/types";
 
-type Message =
+export type Message =
   | { id: string; role: "user"; content: string }
   | { id: string; role: "agent"; response: AgentResponse };
 
@@ -234,6 +235,10 @@ export function Copilot({ onClose, mode = "float", onToggleMode }: CopilotProps)
     inputRef.current?.focus();
   }
 
+  function loadScenario(scenario: CopilotScenario) {
+    setMessages(scenario.messages);
+  }
+
   return (
     <div className="flex h-full flex-col bg-card">
       <div className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
@@ -283,6 +288,35 @@ export function Copilot({ onClose, mode = "float", onToggleMode }: CopilotProps)
             ) : (
               <AgentMessage key={message.id} message={message} />
             )
+          )}
+          {!loading && messages.length <= 1 && (
+            <div className="space-y-2">
+              <p className="px-0.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Try a scenario
+              </p>
+              <div className="grid gap-2">
+                {COPILOT_SCENARIOS.map((s) => {
+                  const Icon = s.icon;
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() => loadScenario(s)}
+                      className="flex items-start gap-3 rounded-xl border bg-card p-3 text-left transition-colors hover:border-primary/40 hover:bg-accent"
+                    >
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                        <Icon className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-medium">{s.title}</span>
+                        <span className="block text-xs text-muted-foreground">
+                          {s.description}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           )}
           {loading && <TypingIndicator />}
         </div>
