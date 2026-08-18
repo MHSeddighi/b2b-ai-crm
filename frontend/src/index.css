@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 243 75% 59%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+    --accent: 243 75% 96%;
+    --accent-foreground: 243 75% 40%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 243 75% 59%;
+    --success: 158 64% 40%;
+    --warning: 35 92% 50%;
+    --chart-primary: #6366f1;
+    --chart-warning: #f59e0b;
+    --radius: 0.625rem;
+  }
+
+  .dark {
+    --background: 222 47% 7%;
+    --foreground: 220 14% 93%;
+    --card: 222 47% 9%;
+    --card-foreground: 220 14% 93%;
+    --popover: 222 47% 9%;
+    --popover-foreground: 220 14% 93%;
+    --primary: 243 75% 66%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 15% 14%;
+    --secondary-foreground: 220 14% 93%;
+    --muted: 220 15% 14%;
+    --muted-foreground: 220 9% 60%;
+    --accent: 243 75% 18%;
+    --accent-foreground: 243 75% 80%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 15% 16%;
+    --input: 220 15% 16%;
+    --ring: 243 75% 66%;
+    --success: 158 64% 48%;
+    --warning: 38 92% 55%;
+    --chart-primary: #818cf8;
+    --chart-warning: #fbbf24;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-border;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@keyframes drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  33% {
+    transform: translate3d(50px, -36px, 0) scale(1.08);
+  }
+  66% {
+    transform: translate3d(-36px, 28px, 0) scale(0.94);
+  }
+}
+
+@layer utilities {
+  .animate-drift {
+    animation: drift 26s ease-in-out infinite;
+  }
+}
