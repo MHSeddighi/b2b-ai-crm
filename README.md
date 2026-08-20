@@ -1239,6 +1239,7 @@ Copy `.env.example` to `.env` and set `LLM_API_KEY`. Supports:
 
 - **OpenAI**: `LLM_PROVIDER=openai`, `LLM_API_KEY=sk-...`
 - **DeepSeek**: `LLM_PROVIDER=deepseek`, `LLM_API_KEY=sk-...`
+- **ArvanCloud AI Gateway**: `LLM_PROVIDER=arvan`, `LLM_API_KEY=...`, `LLM_BASE_URL=https://arvancloudai.ir/gateway/models/<Model>/<deployment-token>/v1`, `LLM_COOKIE=server_session_...=...` (this gateway uses `Authorization: apikey <key>` plus a session cookie instead of a bearer token; the cookie may need refreshing if it expires)
 - **Any OpenAI-compatible / local**: `LLM_PROVIDER=custom`, `LLM_BASE_URL=...`
 
 Without a key, the copilot still works but returns schema-only answers.

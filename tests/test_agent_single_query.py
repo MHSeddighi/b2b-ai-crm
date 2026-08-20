@@ -106,12 +106,16 @@ async def test_failed_query_is_explicit_not_retried():
 
 
 @pytest.mark.asyncio
-async def test_huge_result_not_sent_to_compose():
-    """A huge result triggers the huge guard before any block composition."""
+async def test_huge_result_now_sent_to_compose():
+    """A huge result is composed normally instead of being blocked — the MCP
+    server already returns a representative random sample to summarize from."""
     session = RecordingSession(run_response={
         "resultId": "r_big", "columns": ["x"], "rows": [], "n_rows": 5000,
     })
     with patch.object(db_agent, "_llm_call", new=Mock(return_value=_query_plan("SELECT * FROM sales"))), \
-         patch.object(db_agent, "_ensure_mcp", new=AsyncMock(return_value=session)):
+         patch.object(db_agent, "_ensure_mcp", new=AsyncMock(return_value=session)), \
+         patch.object(db_agent, "_compose", new=AsyncMock(return_value=[
+             {"id": "b1", "type": "markdown", "content": "خلاصه‌ای از داده"},
+         ])):
         result = await db_agent._database_answer("all rows?", db_agent.SessionState("t"))
-    assert "5,000" in result["blocks"][0].content
+    assert result["blocks"][0].content == "خلاصه‌ای از داده"

@@ -38,10 +38,13 @@ class Settings:
 
     # --- LLM ---
     provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
-    # provider = "openai" | "deepseek" | "custom"  (any OpenAI-compatible)
+    # provider = "openai" | "deepseek" | "arvan" | "custom"  (any OpenAI-compatible)
     api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", ""))
     base_url: str = field(default_factory=lambda: os.getenv("LLM_BASE_URL", ""))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    # Session cookie some gateways (e.g. ArvanCloud AI) require alongside the
+    # API key. Optional for every other provider.
+    cookie: str = field(default_factory=lambda: os.getenv("LLM_COOKIE", ""))
 
     @property
     def resolved_base_url(self) -> str:
@@ -58,6 +61,21 @@ class Settings:
         if self.provider == "deepseek":
             return "deepseek-chat"
         return "gpt-4o-mini"
+
+    @property
+    def extra_headers(self) -> dict[str, str]:
+        """Headers to override/add on top of the SDK's default ``Authorization:
+        Bearer <key>``, for gateways with a non-standard auth scheme.
+
+        ArvanCloud AI Gateway expects ``Authorization: apikey <key>`` plus a
+        session cookie rather than a bearer token.
+        """
+        headers: dict[str, str] = {}
+        if self.provider == "arvan":
+            headers["Authorization"] = f"apikey {self.api_key}"
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        return headers
 
     @property
     def has_key(self) -> bool:

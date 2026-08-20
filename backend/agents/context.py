@@ -37,8 +37,10 @@ MAX_MSG_CHARS = 400
 MAX_STORED_RESULTS = 25
 # How many result metadata entries we expose to the LLM at once.
 MAX_RESULT_META = 12
-# Tiny row sample shown to the LLM for reasoning (never the full grid).
-MAX_SAMPLE_ROWS = 5
+# Row sample shown to the LLM for reasoning (never the full grid). Comparison
+# breakdowns (e.g. one row per category) are useless if truncated to a couple
+# of rows — the model then falls back to whatever metric it can actually see.
+MAX_SAMPLE_ROWS = 15
 # How many active resultIds are kept in analytical state.
 MAX_STATE_RESULT_IDS = 8
 
@@ -126,7 +128,7 @@ class SessionState:
             sample = sr.rows[:n]
             lines.append(
                 f"- resultId={rid} | columns={json.dumps(sr.columns, ensure_ascii=False)} | "
-                f"n_rows={sr.n_rows}\n  sample={json.dumps(sample, ensure_ascii=False)[:600]}"
+                f"n_rows={sr.n_rows}\n  sample={json.dumps(sample, ensure_ascii=False)[:2000]}"
             )
         return "\n".join(lines)
 
@@ -209,25 +211,35 @@ class SessionState:
         return "\n\n".join(out)[:MAX_CONTEXT_CHARS]
 
 
+def _block_attr(b: Any, key: str, default: Any = "") -> Any:
+    """Read a block field whether ``b`` is a validated model instance or a
+    plain dict (e.g. from ``.model_dump()``) — ``getattr`` alone silently
+    returns the default for every dict, since dicts don't expose keys as
+    attributes."""
+    if isinstance(b, dict):
+        return b.get(key, default)
+    return getattr(b, key, default)
+
+
 def answer_preview(blocks: list[Any]) -> str:
     """A short preview of an assistant reply for the summary log (never full data)."""
     parts: list[str] = []
     for b in blocks[:4]:
-        t = getattr(b, "type", "?")
+        t = _block_attr(b, "type", "?")
         if t == "markdown":
-            parts.append(_trunc(getattr(b, "content", ""), 160))
+            parts.append(_trunc(_block_attr(b, "content", ""), 160))
         elif t in ("metric",):
-            parts.append(f"[metric:{getattr(b, 'label', '')}]")
+            parts.append(f"[metric:{_block_attr(b, 'label', '')}]")
         elif t == "chart":
-            parts.append(f"[chart:{getattr(b, 'chartType', '')}]")
+            parts.append(f"[chart:{_block_attr(b, 'chartType', '')}]")
         elif t == "table":
             parts.append("[table]")
         elif t == "customer_card":
-            parts.append(f"[customer:{getattr(b, 'customerId', '')}]")
+            parts.append(f"[customer:{_block_attr(b, 'customerId', '')}]")
         elif t == "product_card":
-            parts.append(f"[product:{getattr(b, 'productId', '')}]")
+            parts.append(f"[product:{_block_attr(b, 'productId', '')}]")
         elif t == "order_card":
-            parts.append(f"[order:{getattr(b, 'orderId', '')}]")
+            parts.append(f"[order:{_block_attr(b, 'orderId', '')}]")
         elif t == "recommendation":
             parts.append("[recommendation]")
     return " | ".join(parts) or "(پاسخ)"

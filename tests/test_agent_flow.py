@@ -48,17 +48,27 @@ async def test_database_answer_returns_ordered_blocks_with_result_ids():
 
 
 @pytest.mark.asyncio
-async def test_huge_result_stops_analysis_with_message():
+async def test_huge_result_still_composes_answer():
+    """A huge result no longer blocks composition and asks the user how to
+    proceed — the MCP server already returns a representative random sample,
+    so the agent composes a normal summary from it instead."""
+    blocks_raw = [{"id": "b1", "type": "markdown", "content": "خلاصه"}]
+    session_state = db_agent.SessionState("t")
     with patch.object(db_agent, "_llm_call", new=Mock(return_value=_query_plan("SELECT * FROM sales"))), \
          patch.object(db_agent, "_run_sql", new=AsyncMock(return_value={
              "resultId": "r1", "columns": ["x"], "rows": [], "n_rows": 5000,
          })), \
-         patch.object(db_agent, "_compose", new=AsyncMock(side_effect=AssertionError("must not compose"))):
-        result = await db_agent._database_answer("all sales?", db_agent.SessionState("t"))
+         patch.object(db_agent, "_compose", new=AsyncMock(return_value=blocks_raw)):
+        # Go through answer() (not _database_answer directly): turn-recording
+        # is centralized there now so it happens for every outcome, not just
+        # the success path.
+        result = await db_agent.answer("all sales?", session_state=session_state)
 
     assert result["blocks"][0].type == "markdown"
-    assert "5,000" in result["blocks"][0].content
+    assert result["blocks"][0].content == "خلاصه"
     assert result["results"]["r1"].n_rows == 5000
+    # the turn must still be recorded so a follow-up question keeps context
+    assert session_state.log
 
 
 @pytest.mark.asyncio

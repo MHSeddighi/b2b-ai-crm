@@ -185,9 +185,12 @@ def test_compose_prompt_uses_metadata_and_tiny_sample():
     # metadata present
     assert "r_1" in prompt
     assert "n_rows=500" in prompt
-    # the full 500 rows must NOT appear
+    # the full 500 rows must NOT appear — only a bounded sample window
     assert "C_499" not in prompt
-    assert "C_5" not in prompt  # beyond the tiny sample window
+    # nothing beyond the sample window leaks in (checked against the constant
+    # so raising/lowering MAX_SAMPLE_ROWS can't silently defeat this bound)
+    assert f"C_{MAX_SAMPLE_ROWS}" not in prompt
+    assert f"C_{MAX_SAMPLE_ROWS - 1}" in prompt
 
 
 # ---------------------------------------------------------------------------
