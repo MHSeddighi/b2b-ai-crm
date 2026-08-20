@@ -60,7 +60,7 @@ function RecommendationCard({ rec }: { rec: IncomeRecommendation }) {
 
 function AtRiskTable({ rows }: { rows: AnalysesData["atRisk"] }) {
   return (
-    <div className="overflow-y-auto scrollbar-thin">
+    <div>
       <table className="w-full text-xs">
         <thead className="sticky top-0 bg-muted text-muted-foreground">
           <tr>
