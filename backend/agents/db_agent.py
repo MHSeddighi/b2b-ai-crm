@@ -67,7 +67,22 @@ BUSINESS_RULES = """
 """
 
 
-PLANNER_SYSTEM = f"""You are the Customer 360 reasoning agent.
+CUST_INTEL_IDENTITY = """You are Cust Intel — the customer-intelligence unit of this product.
+
+Cust Intel is ONE product made of two cooperating parts:
+1. The Cust Intel SYSTEM (deterministic): the backend engine, DuckDB database,
+   and the CRM/MCP tools. It alone computes every fact, signal, score,
+   threshold, state, and action — always exactly, never guessed.
+2. The LLM (you): the conversational part of the same product. You plan which
+   tools to call, read the system's outputs, and explain/personalize them for
+   the user. You NEVER compute or recalculate what the system computes.
+
+So when you answer, you speak as Cust Intel: the numbers come from the system,
+the words come from you, and together they are one answer from one product.
+"""
+
+
+PLANNER_SYSTEM = f"""{CUST_INTEL_IDENTITY}
 
 Your job is to decide what is needed to answer the user's question.
 
@@ -278,9 +293,9 @@ Data to support the closing recommendation:
 """
 
 
-COMPOSER_SYSTEM = f"""You are a senior business analyst.
+COMPOSER_SYSTEM = f"""{CUST_INTEL_IDENTITY}
 
-Answer the user's question using the provided results.
+You are now composing the final structured answer (blocks) for the user.
 
 The user does not know the database, columns, SQL, or technical terminology.
 
@@ -357,7 +372,18 @@ Rules:
 
 
 CHAT_SYSTEM = """
-تو دستیار Customer 360 هستی.
+تو «کاست اینتل» (Cust Intel) هستی — واحد هوش مشتری همین محصول.
+
+محصول ما یک واحد است از دو بخش که با هم کار می‌کنند:
+1. سیستم کاست اینتل (قطعی): موتور پشتیبان، پایگاه‌داده DuckDB و ابزارهای CRM/MCP.
+   تمام اعداد، سیگنال‌ها، امتیازها، آستانه‌ها و اقدام‌ها را فقط همین سیستم محاسبه
+   می‌کند — همیشه دقیق، نه حدسی.
+2. مدل زبانی (تو): بخش گفت‌وگوکنندهٔ همین محصول. تو برنامه‌ریزی می‌کنی کدام ابزار
+   صدا زده شود، خروجی سیستم را می‌خوانی و برای کاربر توضیح می‌دهی. تو هرگز چیزی را
+   که سیستم محاسبه کرده دوباره محاسبه یا تغییر نمی‌دهی.
+
+پس وقتی پاسخ می‌دهی، به‌عنوان کاست اینتل حرف بزن: اعداد از سیستم، کلمات از تو، و
+هر دو یک پاسخ از یک محصول هستند.
 به فارسی و طبیعی صحبت کن.
 کوتاه و مستقیم پاسخ بده.
 از اصطلاحات فنی غیرضروری استفاده نکن.
@@ -371,9 +397,9 @@ CHAT_SYSTEM = """
 # Streaming narrative prompt: produces ONLY the natural-language answer as
 # plain text (token-by-token). Structured blocks (charts/tables/metrics) are
 # produced separately afterwards so the long text can stream in immediately.
-NARRATIVE_SYSTEM = f"""You are a senior business analyst.
+NARRATIVE_SYSTEM = f"""{CUST_INTEL_IDENTITY}
 
-Answer the user's question using the provided results.
+You are now writing the natural-language narrative of the answer.
 
 The user does not know the database, columns, SQL, or technical terminology.
 
@@ -506,20 +532,34 @@ RECOMMENDATION SAFETY RULES (mandatory):
 """
 
 
-def _blocks_system(result_ids: str) -> str:
-    return f"""You are a data visualization assistant.
+def _blocks_system(result_ids: str, has_crm: bool = False) -> str:
+    crm_note = (
+        """
+
+CRM results are provided as JSON under "Deterministic customer intelligence"
+below. Each is a table of backend-computed values (columns + rows). You MAY
+build blocks from CRM data even when there are no resultIds: render them as
+INLINE tables with explicit columns/rows (see table shape 4b) — the customer
+names/ids, scores and values are exactly as given; never invent rows or
+numbers.
+"""
+        if has_crm
+        else ""
+    )
+    return f"""You are the data-visualization unit of Cust Intel, the
+customer-intelligence product. You are the same product as the answering
+assistant, but you specialize in turning results into structured blocks.
 
 Given the results, pick the most useful blocks. When results are numeric or
 tabular, ALWAYS add a visualization/card — never leave numbers as plain text.
 Return [] only for purely conversational answers. Use ONLY the available
 resultIds below; column names and id values must match the results EXACTLY
 (never rename them).
-
+{crm_note}
 Available resultIds:
 {result_ids}
 
-Return ONLY a JSON array of blocks. Every block needs a unique "id" and
-(except recommendation) "resultId". Shapes:
+Return ONLY a JSON array of blocks. Every block needs a unique "id". Shapes:
 
 1. metric — one headline number:
    {{"type":"metric","id":"m1","resultId":"<id>","label":"فروش کل","valueKey":"<exact column>","rowIndex":0,"trend":"up"}}
@@ -531,7 +571,8 @@ Return ONLY a JSON array of blocks. Every block needs a unique "id" and
    {{"type":"histogram","id":"h1","resultId":"<id>","dataKey":"<exact numeric column>","bins":10,"title":"توزیع فروش"}}
 
 4. table — ranked lists / multi-row detail:
-   {{"type":"table","id":"t1","resultId":"<id>","title":"برترین مشتریان"}}
+   a) {{"type":"table","id":"t1","resultId":"<id>","title":"برترین مشتریان"}}
+   b) {{"type":"table","id":"t1","columns":["<exact column names>"],"rows":[["<values>"],["<values>"]]}}  (use this for CRM data without a resultId)
 
 5. customer_card — one specific customer (1-row result):
    {{"type":"customer_card","id":"cc1","resultId":"<id>","customerId":"<exact Customer_ID value>"}}
@@ -1253,14 +1294,14 @@ async def _plan_stream(
     yield ("plan", plan)
 
 
-def _render_crm(crm_results: dict[str, Any]) -> str:
+def _render_crm(crm_results: dict[str, Any], max_chars: int = 2500) -> str:
     """Render deterministic CRM tool results as a compact JSON block."""
     if not crm_results:
         return ""
     parts: list[str] = []
     for key, data in crm_results.items():
         js = json.dumps(data, ensure_ascii=False, default=str)
-        parts.append(f"CRM result [{key}]:\n{js[:2500]}")
+        parts.append(f"CRM result [{key}]:\n{js[:max_chars]}")
     return "\n\n".join(parts)
 
 
@@ -1358,7 +1399,7 @@ def _compose_prompt(
         list(results.keys())
     )
 
-    crm_block = _render_crm(crm_results or {})
+    crm_block = _render_crm(crm_results or {}, max_chars=9000)
 
     return f"""
 User question:
@@ -1375,8 +1416,8 @@ Results:
 {_discriminator_summary(results)}
 {signals}
 
-Deterministic customer intelligence (backend-computed, do NOT recalculate or
-invent; use these values verbatim for any recommendation):
+Deterministic customer intelligence (computed by the Cust Intel system — do
+NOT recalculate or invent; use these values verbatim for any recommendation):
 {crm_block or "(none)"}
 
 Answer the user's question using these results. The user does not know the
@@ -1690,7 +1731,7 @@ def _narrative_prompt(
 ) -> str:
     context = ctx.render_context(question, active_ids=[])
     samples = ctx.result_samples(list(results.keys()))
-    crm_block = _render_crm(crm_results or {})
+    crm_block = _render_crm(crm_results or {}, max_chars=9000)
     return f"""
 User question:
 {question}
@@ -1706,8 +1747,8 @@ Results:
 {_discriminator_summary(results)}
 {signals}
 
-Deterministic customer intelligence (backend-computed; do NOT recalculate or
-invent — use these values verbatim for any recommendation):
+Deterministic customer intelligence (computed by the Cust Intel system; do
+NOT recalculate or invent — use these values verbatim for any recommendation):
 {crm_block or "(none)"}
 
 Answer the user's question using these results, as plain natural-language text.
@@ -1724,7 +1765,7 @@ def _blocks_prompt(
 ) -> str:
     context = ctx.render_context(question, active_ids=[])
     samples = ctx.result_samples(list(results.keys()))
-    crm_block = _render_crm(crm_results or {})
+    crm_block = _render_crm(crm_results or {}, max_chars=9000)
     return f"""
 User question:
 {question}
@@ -1738,11 +1779,13 @@ Assumption:
 Results:
 {samples}
 
-Deterministic customer intelligence (backend-computed):
+Deterministic customer intelligence (backend-computed, from the Cust Intel
+system — build tables/cards from these values; never invent rows or numbers):
 {crm_block or "(none)"}
 
 Return ONLY a JSON array of blocks (non-markdown). Use only the available
-resultIds. Return an empty array if no block genuinely improves the answer.
+resultIds; for CRM data with no resultId use inline tables (columns+rows).
+Return an empty array if no block genuinely improves the answer.
 """
 
 
@@ -1785,11 +1828,17 @@ async def _compose_blocks(
     crm_results: dict[str, Any] | None = None,
     trace: Trace | None = None,
 ) -> list[dict]:
-    """Produce optional structured blocks (charts/tables/metrics) at the end."""
-    if not results:
+    """Produce optional structured blocks (charts/tables/metrics) at the end.
+
+    Runs for SQL results AND/OR CRM tool results: CRM-only answers (e.g. the
+    at-risk customer list) must still render as tables even though there are
+    no SQL resultIds to reference.
+    """
+    crm_results = crm_results or {}
+    if not results and not crm_results:
         return []
     raw = await _llm_call_async(
-        _blocks_system(", ".join(results.keys())),
+        _blocks_system(", ".join(results.keys()), has_crm=bool(crm_results)),
         _blocks_prompt(question, ctx, results, assumption, crm_results),
         temperature=0.0,
         trace=trace,

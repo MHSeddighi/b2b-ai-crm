@@ -305,7 +305,7 @@ export function Copilot({
       {
         role: "assistant",
         content:
-          "سلام! من دستیار هوشمند بینش مشتری شما هستم. درباره مشتریان، فروش، ریسک، شکایات، کیفیت یا هر موضوع دیگری بپرسید.",
+          "سلام! من Cust Intel هستم — واحد هوش مشتری محصول شما. درباره مشتریان، فروش، ریسک، شکایات، کیفیت یا هر موضوع دیگری بپرسید.",
       },
     ],
   });
@@ -316,10 +316,10 @@ export function Copilot({
         <div className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
           <AgentAvatar />
           <div className="flex min-w-0 flex-col leading-tight">
-            <span className="text-sm font-semibold">دستیار هوشمند</span>
+            <span className="text-sm font-semibold">Cust Intel</span>
             <span className="inline-flex items-center gap-1 text-[11px] text-emerald-500">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              متصل · پایگاه‌داده واقعی
+              متصل · سیستم + هوش مصنوعی
             </span>
           </div>
           <div className="mr-auto flex items-center gap-1">

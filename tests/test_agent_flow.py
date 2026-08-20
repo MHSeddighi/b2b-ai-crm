@@ -6,6 +6,8 @@ huge results.
 """
 from unittest.mock import AsyncMock, Mock, patch
 
+import json
+
 import pytest
 
 from backend.agents import db_agent
@@ -113,3 +115,50 @@ async def test_assumption_flows_into_compose():
          patch.object(db_agent, "_compose", new=fake_compose):
         await db_agent._database_answer("one customer?", db_agent.SessionState("t"))
     assert captured.get("assumption") == "picked C_937594"
+
+
+@pytest.mark.asyncio
+async def test_compose_blocks_builds_inline_table_from_crm_only_answer():
+    """A CRM-only answer (e.g. the at-risk list) must still produce table
+    blocks even though there are no SQL resultIds to reference."""
+    crm_results = {
+        "top_at_risk_customers:10": {
+            "columns": ["Customer_ID", "complaints", "orders", "bounced", "risk_score"],
+            "rows": [
+                ["C_117580", 9, 622, 3, 92],
+                ["C_683666", 37, 44, 2, 92],
+            ],
+            "n_rows": 2,
+        }
+    }
+    blocks_raw = [
+        {"id": "t1", "type": "table", "columns": ["Customer_ID", "complaints", "orders", "bounced", "risk_score"],
+         "rows": [["C_117580", 9, 622, 3, 92], ["C_683666", 37, 44, 2, 92]],
+         "title": "مشتریان در معرض ریسک"},
+    ]
+    with patch.object(db_agent, "_llm_call_async",
+                      new=AsyncMock(return_value=json.dumps(blocks_raw))):
+        blocks = await db_agent._compose_blocks(
+            "کدام مشتری‌ها در معرض از دست رفتن هستند؟",
+            db_agent.SessionState("t"),
+            results={},
+            assumption="",
+            crm_results=crm_results,
+            trace=None,
+        )
+    tables = [b for b in blocks if b.get("type") == "table"]
+    assert tables, "CRM-only answers must produce table blocks"
+    assert tables[0]["rows"][0][0] == "C_117580"
+    assert tables[0]["columns"] == ["Customer_ID", "complaints", "orders", "bounced", "risk_score"]
+
+
+@pytest.mark.asyncio
+async def test_compose_blocks_returns_empty_without_any_data():
+    """No results and no CRM data -> no blocks (conversational only)."""
+    with patch.object(db_agent, "_llm_call_async",
+                      new=AsyncMock(return_value="[]")):
+        blocks = await db_agent._compose_blocks(
+            "سلام", db_agent.SessionState("t"),
+            results={}, assumption="", crm_results=None, trace=None,
+        )
+    assert blocks == []
