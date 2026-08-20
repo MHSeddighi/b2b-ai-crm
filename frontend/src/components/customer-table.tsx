@@ -36,18 +36,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { riskColor } from "@/lib/mock-data";
-import { formatCurrency, formatPercent, cn } from "@/lib/utils";
-import type { Customer, RiskLevel } from "@/lib/types";
+import { formatCurrency, formatNumber, cn } from "@/lib/utils";
+import type { CustomerRow } from "@/lib/api";
 
-const columnHelper = createColumnHelper<Customer>();
+const columnHelper = createColumnHelper<CustomerRow>();
+
+const statusBadge: Record<string, string> = {
+  فعال: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+  غیرفعال: "bg-muted text-muted-foreground",
+};
 
 interface CustomerTableProps {
-  data: Customer[];
+  data: CustomerRow[];
   pageSize?: number;
   dense?: boolean;
   toolbar?: boolean;
-  onSelectCustomer?: (customer: Customer) => void;
+  onSelectCustomer?: (customer: CustomerRow) => void;
 }
 
 export function CustomerTable({
@@ -64,89 +68,70 @@ export function CustomerTable({
 
   const columns = useMemo(
     () => [
-      columnHelper.accessor("name", {
-        header: "Customer",
+      columnHelper.accessor("Customer_ID", {
+        header: "کد مشتری",
+        cell: (info) => (
+          <span className="font-medium tabular-nums">{info.getValue()}</span>
+        ),
+      }),
+      columnHelper.accessor("Customer_Segment", {
+        header: "سگمنت",
+        cell: (info) => (
+          <span className="text-muted-foreground">{info.getValue() ?? "—"}</span>
+        ),
+      }),
+      columnHelper.accessor("Customer_Status", {
+        header: "وضعیت",
         cell: (info) => {
-          const customer = info.row.original;
-          const initials = customer.name
-            .split(" ")
-            .map((p) => p[0])
-            .slice(0, 2)
-            .join("");
+          const status = info.getValue() ?? "";
           return (
-            <div className="flex items-center gap-3">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-medium text-secondary-foreground">
-                {initials}
-              </span>
-              <div className="flex min-w-0 flex-col leading-tight">
-                <span className="truncate font-medium">{customer.name}</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {customer.segment} · {customer.region}
-                </span>
-              </div>
-            </div>
+            <Badge variant="outline" className={cn(statusBadge[status] ?? "", "border-transparent")}>
+              {status || "—"}
+            </Badge>
           );
         },
       }),
       columnHelper.accessor("revenue", {
-        header: () => <span className="text-right">Revenue</span>,
+        header: () => <span className="text-left">درآمد</span>,
         cell: (info) => (
-          <span className="block text-right font-medium tabular-nums">
+          <span className="block text-left font-medium tabular-nums">
             {formatCurrency(info.getValue())}
           </span>
         ),
       }),
+      columnHelper.accessor("orders", {
+        header: () => <span className="text-left">سفارش</span>,
+        cell: (info) => <span className="block text-left tabular-nums">{formatNumber(info.getValue())}</span>,
+      }),
       columnHelper.accessor("complaints", {
-        header: () => <span className="text-right">Complaints</span>,
-        cell: (info) => <span className="block text-right tabular-nums">{info.getValue()}</span>,
+        header: () => <span className="text-left">شکایت</span>,
+        cell: (info) => <span className="block text-left tabular-nums">{formatNumber(info.getValue())}</span>,
       }),
-      columnHelper.accessor("purchaseChange", {
-        header: () => <span className="text-right">Purchase Change</span>,
-        cell: (info) => {
-          const v = info.getValue();
-          const positive = v >= 0;
-          return (
-            <span
-              className={cn(
-                "block text-right font-medium tabular-nums",
-                positive ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"
-              )}
-            >
-              {formatPercent(v)}
-            </span>
-          );
-        },
-      }),
-      columnHelper.accessor("risk", {
-        header: () => <span>Risk</span>,
-        cell: (info) => {
-          const risk = info.getValue() as RiskLevel;
-          const palette = riskColor[risk];
-          return (
-            <Badge variant="outline" className={cn(palette.bg, "gap-1.5 border-transparent")}>
-              <span className={cn("h-1.5 w-1.5 rounded-full", palette.dot)} />
-              <span className={palette.text}>{palette.label}</span>
-            </Badge>
-          );
-        },
+      columnHelper.accessor("Credit_Limit", {
+        header: () => <span className="text-left">سقف اعتبار</span>,
+        cell: (info) => (
+          <span className="block text-left tabular-nums">
+            {info.getValue() != null ? formatCurrency(Number(info.getValue())) : "—"}
+          </span>
+        ),
       }),
       ...(onSelectCustomer
         ? [
             columnHelper.display({
               id: "actions",
-              header: () => <span className="sr-only">Open</span>,
+              header: () => <span className="sr-only">باز کردن</span>,
               cell: (info) => (
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="ml-auto h-7 w-7 text-muted-foreground hover:text-foreground"
+                  className="mr-auto h-7 w-7 text-muted-foreground hover:text-foreground"
                   onClick={(e) => {
                     e.stopPropagation();
                     onSelectCustomer(info.row.original);
                   }}
-                  aria-label="Open customer 360"
+                  aria-label="باز کردن نمای ۳۶۰ مشتری"
                 >
-                  <ChevronRight className="h-4 w-4" />
+                  <ChevronLeft className="h-4 w-4" />
                 </Button>
               ),
             }),
@@ -168,16 +153,16 @@ export function CustomerTable({
     getFilteredRowModel: getFilteredRowModel(),
   });
 
-  const riskFilterValue =
-    (columnFilters.find((f) => f.id === "risk")?.value as string | undefined) ?? "all";
+  const statusFilterValue =
+    (columnFilters.find((f) => f.id === "Customer_Status")?.value as string | undefined) ?? "all";
 
-  const setRiskFilter = (value: string) => {
+  const setStatusFilter = (value: string) => {
     if (value === "all") {
-      setColumnFilters((prev) => prev.filter((f) => f.id !== "risk"));
+      setColumnFilters((prev) => prev.filter((f) => f.id !== "Customer_Status"));
     } else {
       setColumnFilters((prev) => [
-        ...prev.filter((f) => f.id !== "risk"),
-        { id: "risk", value },
+        ...prev.filter((f) => f.id !== "Customer_Status"),
+        { id: "Customer_Status", value },
       ]);
     }
     setPageIndex(0);
@@ -195,27 +180,26 @@ export function CustomerTable({
       {toolbar && (
         <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="relative sm:w-64">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Search className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={globalFilter}
               onChange={(e) => {
                 setGlobalFilter(e.target.value);
                 setPageIndex(0);
               }}
-              placeholder="Search customers..."
-              className="pl-9"
-              aria-label="Search customers"
+              placeholder="جستجوی مشتری..."
+              className="pr-9"
+              aria-label="جستجوی مشتری"
             />
           </div>
-          <Select value={riskFilterValue} onValueChange={setRiskFilter}>
-            <SelectTrigger className="w-full sm:w-44" aria-label="Filter by risk">
-              <SelectValue placeholder="All risk levels" />
+          <Select value={statusFilterValue} onValueChange={setStatusFilter}>
+            <SelectTrigger className="w-full sm:w-44" aria-label="فیلتر بر اساس وضعیت">
+              <SelectValue placeholder="همه وضعیت‌ها" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All risk levels</SelectItem>
-              <SelectItem value="high">High risk</SelectItem>
-              <SelectItem value="medium">Medium risk</SelectItem>
-              <SelectItem value="low">Low risk</SelectItem>
+              <SelectItem value="all">همه وضعیت‌ها</SelectItem>
+              <SelectItem value="فعال">فعال</SelectItem>
+              <SelectItem value="غیرفعال">غیرفعال</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -230,14 +214,15 @@ export function CustomerTable({
                   const isSorted = header.column.getIsSorted();
                   const numeric =
                     header.column.id === "revenue" ||
+                    header.column.id === "orders" ||
                     header.column.id === "complaints" ||
-                    header.column.id === "purchaseChange";
+                    header.column.id === "Credit_Limit";
                   return (
-                    <TableHead key={header.id} className={cn(numeric && "text-right")}>
+                    <TableHead key={header.id} className={cn(numeric && "text-left")}>
                       {header.isPlaceholder ? null : (
                         <button
                           className={cn(
-                            "inline-flex items-center gap-1 uppercase tracking-wide hover:text-foreground",
+                            "inline-flex items-center gap-1 tracking-wide hover:text-foreground",
                             header.column.getCanSort() && "cursor-pointer select-none"
                           )}
                           onClick={header.column.getToggleSortingHandler()}
@@ -266,7 +251,7 @@ export function CustomerTable({
                   colSpan={columns.length}
                   className="h-24 text-center text-muted-foreground"
                 >
-                  No customers match your filters.
+                  هیچ مشتری‌ای با فیلترهای شما مطابقت ندارد.
                 </TableCell>
               </TableRow>
             ) : (
@@ -274,7 +259,7 @@ export function CustomerTable({
                 <TableRow
                   key={row.id}
                   className={cn(dense && "h-12", onSelectCustomer && "cursor-pointer")}
-                  title={onSelectCustomer ? "Open customer 360" : undefined}
+                  title={onSelectCustomer ? "باز کردن نمای ۳۶۰ مشتری" : undefined}
                   onClick={
                     onSelectCustomer ? () => onSelectCustomer(row.original) : undefined
                   }
@@ -293,7 +278,7 @@ export function CustomerTable({
 
       <div className="flex items-center justify-between border-t px-4 py-2">
         <p className="text-xs text-muted-foreground">
-          {table.getFilteredRowModel().rows.length} customers
+          {formatNumber(table.getFilteredRowModel().rows.length)} مشتری
         </p>
         <div className="flex items-center gap-1">
           <Button
@@ -302,12 +287,12 @@ export function CustomerTable({
             className="h-7 w-7"
             disabled={currentPage === 0}
             onClick={() => setPageIndex((p) => Math.max(0, p - 1))}
-            aria-label="Previous page"
+            aria-label="صفحه قبل"
           >
-            <ChevronLeft className="h-4 w-4" />
+            <ChevronRight className="h-4 w-4" />
           </Button>
           <span className="px-2 text-xs tabular-nums text-muted-foreground">
-            {currentPage + 1} / {pageCount}
+            {formatNumber(currentPage + 1)} / {formatNumber(pageCount)}
           </span>
           <Button
             variant="ghost"
@@ -315,9 +300,9 @@ export function CustomerTable({
             className="h-7 w-7"
             disabled={currentPage >= pageCount - 1}
             onClick={() => setPageIndex((p) => Math.min(pageCount - 1, p + 1))}
-            aria-label="Next page"
+            aria-label="صفحه بعد"
           >
-            <ChevronRight className="h-4 w-4" />
+            <ChevronLeft className="h-4 w-4" />
           </Button>
         </div>
       </div>

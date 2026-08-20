@@ -1,10 +1,8 @@
+import { useEffect, useState } from "react";
 import {
   Users,
-  AlertTriangle,
   MessageSquareWarning,
   DollarSign,
-  ArrowUpRight,
-  ArrowDownRight,
 } from "lucide-react";
 import {
   Area,
@@ -22,32 +20,20 @@ import {
 } from "recharts";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import {
-  dashboardKpis,
-  purchaseTrend,
-  complaintTrend,
-  riskTiers,
-} from "@/lib/mock-data";
+import { fetchDashboard, type DashboardData, type KpiValue } from "@/lib/api";
 import { formatCompact } from "@/lib/utils";
-import type { Kpi } from "@/lib/types";
 
 const kpiIcons: Record<string, typeof Users> = {
-  "Total Customers": Users,
-  "Customers At Risk": AlertTriangle,
-  Complaints: MessageSquareWarning,
-  Revenue: DollarSign,
+  "کل مشتریان": Users,
+  "درآمد کل": DollarSign,
+  "سفارش‌ها": Users,
+  "شکایات": MessageSquareWarning,
 };
 
-const riskColors: Record<string, string> = {
-  Low: "#10b981",
-  Medium: "#f59e0b",
-  High: "#ef4444",
-};
+const pieColors = ["#6366f1", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444", "#06b6d4"];
 
-function KpiCard({ kpi, index }: { kpi: Kpi; index: number }) {
+function KpiCard({ kpi, index }: { kpi: KpiValue; index: number }) {
   const Icon = kpiIcons[kpi.label] ?? Users;
-  const positive = kpi.trend === "up";
-  const TrendIcon = positive ? ArrowUpRight : ArrowDownRight;
   return (
     <Card className="animate-fade-in-up" style={{ animationDelay: `${index * 60}ms` }}>
       <CardContent className="p-6">
@@ -58,16 +44,11 @@ function KpiCard({ kpi, index }: { kpi: Kpi; index: number }) {
           </span>
         </div>
         <div className="mt-4 flex items-end justify-between">
-          <p className="text-2xl font-semibold tracking-tight">{kpi.value}</p>
+          <p className="text-2xl font-semibold tabular-nums tracking-tight">
+            {formatCompact(kpi.value)}
+          </p>
           {kpi.change && (
-            <span
-              className={`inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium ${
-                positive
-                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                  : "bg-red-500/10 text-red-600 dark:text-red-400"
-              }`}
-            >
-              <TrendIcon className="h-3 w-3" />
+            <span className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium">
               {kpi.change}
             </span>
           )}
@@ -77,17 +58,17 @@ function KpiCard({ kpi, index }: { kpi: Kpi; index: number }) {
   );
 }
 
-function PurchaseTrendChart() {
+function PurchaseTrendChart({ data }: { data: DashboardData["purchaseTrend"] }) {
   return (
     <Card className="animate-fade-in-up" style={{ animationDelay: "240ms" }}>
       <CardHeader>
-        <CardTitle className="text-base">Purchase Trend</CardTitle>
-        <CardDescription>Monthly purchase volume (in millions)</CardDescription>
+        <CardTitle className="text-base">روند فروش</CardTitle>
+        <CardDescription>حجم فروش ماهانه (مبالغ کل)</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={purchaseTrend} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
+            <AreaChart data={data} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
               <defs>
                 <linearGradient id="purchaseGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="var(--chart-primary)" stopOpacity={0.35} />
@@ -99,19 +80,20 @@ function PurchaseTrendChart() {
                 dataKey="month"
                 tickLine={false}
                 axisLine={false}
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 10 }}
+                interval="preserveStartEnd"
                 className="text-muted-foreground"
               />
               <YAxis
                 tickLine={false}
                 axisLine={false}
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 10 }}
                 className="text-muted-foreground"
-                tickFormatter={(v) => `$${v}M`}
+                tickFormatter={(v) => formatCompact(Number(v))}
               />
               <Tooltip
                 contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))", fontSize: 12 }}
-                formatter={(v) => [`$${v}M`, "Volume"]}
+                formatter={(v) => [formatCompact(Number(v)), "مبلغ کل"]}
               />
               <Area
                 type="monotone"
@@ -128,29 +110,30 @@ function PurchaseTrendChart() {
   );
 }
 
-function ComplaintTrendChart() {
+function ComplaintTrendChart({ data }: { data: DashboardData["complaintTrend"] }) {
   return (
     <Card className="animate-fade-in-up" style={{ animationDelay: "300ms" }}>
       <CardHeader>
-        <CardTitle className="text-base">Complaint Trend</CardTitle>
-        <CardDescription>Complaints logged per month</CardDescription>
+        <CardTitle className="text-base">روند شکایات</CardTitle>
+        <CardDescription>شکایات ثبت‌شده در هر ماه</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={complaintTrend} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}>
+            <BarChart data={data} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
               <XAxis
                 dataKey="month"
                 tickLine={false}
                 axisLine={false}
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 10 }}
+                interval="preserveStartEnd"
                 className="text-muted-foreground"
               />
               <YAxis
                 tickLine={false}
                 axisLine={false}
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 10 }}
                 className="text-muted-foreground"
               />
               <Tooltip
@@ -166,13 +149,21 @@ function ComplaintTrendChart() {
   );
 }
 
-function CustomerRiskChart() {
-  const total = riskTiers.reduce((acc, t) => acc + t.customers, 0);
+function DistributionChart({
+  title,
+  subtitle,
+  data,
+}: {
+  title: string;
+  subtitle: string;
+  data: DashboardData["segmentDistribution"];
+}) {
+  const total = data.reduce((acc, d) => acc + d.value, 0);
   return (
     <Card className="animate-fade-in-up" style={{ animationDelay: "360ms" }}>
       <CardHeader>
-        <CardTitle className="text-base">Customer Risk Distribution</CardTitle>
-        <CardDescription>Count of customers by risk tier</CardDescription>
+        <CardTitle className="text-base">{title}</CardTitle>
+        <CardDescription>{subtitle}</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="flex items-center gap-6">
@@ -180,37 +171,38 @@ function CustomerRiskChart() {
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
-                  data={riskTiers}
-                  dataKey="customers"
-                  nameKey="tier"
+                  data={data}
+                  dataKey="value"
+                  nameKey="name"
                   innerRadius={50}
                   outerRadius={80}
                   paddingAngle={2}
                 >
-                  {riskTiers.map((entry) => (
-                    <Cell key={entry.tier} fill={riskColors[entry.tier]} />
+                  {data.map((entry, i) => (
+                    <Cell key={entry.name} fill={pieColors[i % pieColors.length]} />
                   ))}
                 </Pie>
                 <Tooltip
                   contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))", fontSize: 12 }}
+                  formatter={(v) => [formatCompact(Number(v)), "تعداد"]}
                 />
               </PieChart>
             </ResponsiveContainer>
           </div>
           <div className="flex-1 space-y-3">
-            {riskTiers.map((tier) => (
-              <div key={tier.tier} className="flex items-center justify-between text-sm">
+            {data.map((d, i) => (
+              <div key={d.name} className="flex items-center justify-between text-sm">
                 <span className="flex items-center gap-2 text-muted-foreground">
                   <span
                     className="h-2.5 w-2.5 rounded-full"
-                    style={{ background: riskColors[tier.tier] }}
+                    style={{ background: pieColors[i % pieColors.length] }}
                   />
-                  {tier.tier} risk
+                  {d.name}
                 </span>
-                <span className="font-medium">
-                  {tier.customers}
-                  <span className="ml-1 text-xs text-muted-foreground">
-                    {Math.round((tier.customers / total) * 100)}%
+                <span className="font-medium tabular-nums">
+                  {formatCompact(d.value)}
+                  <span className="mr-1 text-xs text-muted-foreground">
+                    {Math.round((d.value / (total || 1)) * 100)}٪
                   </span>
                 </span>
               </div>
@@ -223,60 +215,74 @@ function CustomerRiskChart() {
 }
 
 export function Dashboard() {
+  const [data, setData] = useState<DashboardData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchDashboard().then(setData).catch(() => setError("امکان بارگذاری داده‌ها وجود ندارد."));
+  }, []);
+
+  if (error) {
+    return (
+      <div className="flex h-full items-center justify-center pt-20">
+        <p className="text-sm text-muted-foreground">{error}</p>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col gap-1 pt-4">
+          <h1 className="text-2xl font-semibold tracking-tight">داشبورد</h1>
+          <p className="text-sm text-muted-foreground">
+            نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="h-32 animate-pulse rounded-xl border bg-muted/50" />
+          ))}
+        </div>
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+          <div className="h-72 animate-pulse rounded-xl border bg-muted/50" />
+          <div className="h-72 animate-pulse rounded-xl border bg-muted/50" />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
+      <div className="flex flex-col gap-1 pt-4">
+        <h1 className="text-2xl font-semibold tracking-tight">داشبورد</h1>
+        <p className="text-sm text-muted-foreground">
+          نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار.
+        </p>
+      </div>
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {dashboardKpis.map((kpi, i) => (
+        {data.kpis.map((kpi, i) => (
           <KpiCard key={kpi.label} kpi={kpi} index={i} />
         ))}
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <PurchaseTrendChart />
-        <ComplaintTrendChart />
+        <PurchaseTrendChart data={data.purchaseTrend} />
+        <ComplaintTrendChart data={data.complaintTrend} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <CustomerRiskChart />
-        <Card className="animate-fade-in-up" style={{ animationDelay: "420ms" }}>
-          <CardHeader>
-            <CardTitle className="text-base">Risk Revenue Exposure</CardTitle>
-            <CardDescription>At-risk revenue by tier ($M)</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="h-48">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={riskTiers}
-                  layout="vertical"
-                  margin={{ top: 4, right: 8, left: 8, bottom: 0 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-border" horizontal={false} />
-                  <XAxis type="number" hide className="text-muted-foreground" />
-                  <YAxis
-                    type="category"
-                    dataKey="tier"
-                    tickLine={false}
-                    axisLine={false}
-                    width={64}
-                    tick={{ fontSize: 12 }}
-                    className="text-muted-foreground"
-                  />
-                  <Tooltip
-                    cursor={{ fill: "hsl(var(--muted))" }}
-                    contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))", fontSize: 12 }}
-                    formatter={(v) => [`$${formatCompact(Number(v))}`, "Revenue"]}
-                  />
-                  <Bar dataKey="revenue" radius={[0, 4, 4, 0]} barSize={18}>
-                    {riskTiers.map((entry) => (
-                      <Cell key={entry.tier} fill={riskColors[entry.tier]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
+        <DistributionChart
+          title="توزیع سگمنت مشتریان"
+          subtitle="تعداد مشتریان بر اساس سگمنت"
+          data={data.segmentDistribution}
+        />
+        <DistributionChart
+          title="وضعیت مشتریان"
+          subtitle="تعداد مشتریان بر اساس وضعیت"
+          data={data.statusDistribution}
+        />
       </div>
     </div>
   );
