@@ -97,6 +97,7 @@ export interface MarketSignalRecord {
 
 export interface Customer360Data {
   customer: Record<string, unknown>;
+  customerProfile: { label: string; value: unknown }[];
   summary: string | null;
   summaryReady: boolean;
   riskScore: number | null;
@@ -197,6 +198,7 @@ export interface AnalysesData {
 export type SummaryStatus =
   | { status: "ready"; summary: string; generated: boolean }
   | { status: "generating"; summary: null; generated: boolean }
+  | { status: "not_ready"; summary: null; generated: boolean }
   | { status: "not_found"; summary: null; generated: boolean };
 
 // Backend is reached directly at its absolute path (no Vite proxy).
@@ -213,8 +215,8 @@ export function fetchDashboard(): Promise<DashboardData> {
   return getJson<DashboardData>("/dashboard");
 }
 
-export function fetchDashboardIntelligence(): Promise<SummaryStatus> {
-  return getJson<SummaryStatus>("/dashboard/intelligence");
+export function fetchDashboardIntelligence(refresh = false): Promise<SummaryStatus> {
+  return getJson<SummaryStatus>(`/dashboard/intelligence${refresh ? "?refresh=1" : ""}`);
 }
 
 export function fetchAnalyses(): Promise<AnalysesData> {
@@ -230,9 +232,9 @@ export function fetchCustomer360(id: string): Promise<Customer360Data> {
   return getJson<Customer360Data>(`/customers/${encodeURIComponent(id)}/360`);
 }
 
-export function fetchCustomer360Summary(id: string): Promise<SummaryStatus> {
+export function fetchCustomer360Summary(id: string, refresh = false): Promise<SummaryStatus> {
   return getJson<SummaryStatus>(
-    `/customers/${encodeURIComponent(id)}/360/summary`
+    `/customers/${encodeURIComponent(id)}/360/summary${refresh ? "?refresh=1" : ""}`
   );
 }
 

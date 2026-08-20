@@ -501,16 +501,8 @@ def _signal_tone(status: str) -> str:
 
 
 def _signal_detail(sig_id: str, status: str) -> str:
-    fa = {
-        "critical": "بحرانی",
-        "warning": "هشدار",
-        "positive": "مثبت",
-        "neutral": "خنثی",
-        "low": "کم",
-        "high": "بالا",
-        "unknown": "نامشخص",
-    }
-    return f"وضعیت: {fa.get(status, status)}"
+    from backend.crm.labels import STATUS_FA
+    return f"وضعیت: {STATUS_FA.get(status, status)}"
 
 
 def _level_from_status(status: str) -> str:
@@ -824,8 +816,19 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
         summary = None
         summary_ready = False
 
+        # Curated, human-readable profile — raw internal ids/system fields are
+        # deliberately excluded (they are not meaningful to a sales manager).
+        customer_profile = [
+            {"label": "بخش بازار", "value": cust.get("Customer_Segment")},
+            {"label": "وضعیت", "value": cust.get("Customer_Status")},
+            {"label": "شروع همکاری", "value": cust.get("Relationship_Start_Date")},
+            {"label": "سقف اعتبار", "value": cust.get("Credit_Limit")},
+            {"label": "شرایط پرداخت", "value": cust.get("Payment_Terms_Days")},
+        ]
+
         return {
             "customer": cust,
+            "customerProfile": customer_profile,
             "summary": summary,
             "summaryReady": summary_ready,
             "riskScore": ci.state.churn_risk.score if ci.state else None,

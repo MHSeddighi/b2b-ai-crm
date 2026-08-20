@@ -5,13 +5,13 @@ import {
   BadgeCheck,
   CalendarClock,
   ClipboardList,
-  FileText,
   Handshake,
   Lightbulb,
   Loader2,
   MailQuestion,
   MessageSquareWarning,
   Receipt,
+  RefreshCw,
   ShoppingCart,
   Sparkles,
   Tags,
@@ -37,7 +37,7 @@ import {
   type MarketSignalRecord,
 } from "@/lib/api";
 import { formatCurrency, formatNumber, formatDate, cn } from "@/lib/utils";
-import { ExpandableSection } from "@/components/expandable";
+import { SectionCard } from "@/components/section-card";
 
 const riskTone: Record<string, string> = {
   زیاد: "bg-red-500",
@@ -114,43 +114,24 @@ function MetaRow({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function ListBody<T>({
-  items,
-  render,
-  previewCount = 2,
-  empty,
-}: {
-  items: T[];
-  render: (item: T) => ReactNode;
-  previewCount?: number;
-  empty: string;
-}) {
-  if (items.length === 0) {
-    return <p className="text-xs text-muted-foreground">{empty}</p>;
-  }
-  return (
-    <div className="space-y-2">
-      {items.slice(0, previewCount).map((item, i) => (
-        <div key={i}>{render(item)}</div>
-      ))}
-    </div>
-  );
-}
-
-function FullList<T>({
+function SectionList<T>({
   items,
   render,
   empty,
+  scrollHeight = "max-h-80",
 }: {
   items: T[];
   render: (item: T) => ReactNode;
   empty: string;
+  scrollHeight?: string;
 }) {
   if (items.length === 0) {
-    return <p className="text-xs text-muted-foreground">{empty}</p>;
+    return (
+      <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{empty}</p>
+    );
   }
   return (
-    <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
+    <div className={cn("space-y-2 overflow-y-auto scrollbar-thin", scrollHeight)}>
       {items.map((item, i) => (
         <div key={i}>{render(item)}</div>
       ))}
@@ -171,10 +152,7 @@ function ComplaintCard({ c }: { c: ComplaintRecord }) {
           </span>
         )}
         {c.status && (
-          <Badge
-            variant="outline"
-            className="gap-1 border-transparent text-[10px]"
-          >
+          <Badge variant="outline" className="gap-1 border-transparent text-[10px]">
             <span className={cn("h-1.5 w-1.5 rounded-full", statusTone[c.status] ?? "bg-muted-foreground")} />
             {c.status}
           </Badge>
@@ -184,7 +162,6 @@ function ComplaintCard({ c }: { c: ComplaintRecord }) {
       <p className="mt-1 flex items-center gap-1 text-[10px] text-muted-foreground/80">
         <CalendarClock className="h-3 w-3" />
         {formatDate(c.date)}
-        {c.product && <span>{" · "}{c.product}</span>}
       </p>
     </div>
   );
@@ -330,7 +307,7 @@ function SummaryText({ text }: { text: string }) {
   return (
     <div className="space-y-2">
       {lines.map((line, i) => {
-        const trimmed = line.trim();
+        const trimmed = line.trim().replace(/[.\u06D4]+$/, "");
         if (trimmed.startsWith("- ") || trimmed.startsWith("• ")) {
           return (
             <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
@@ -379,11 +356,29 @@ function SummaryLoader() {
   );
 }
 
+/* profile -------------------------------------------------------------- */
+function ProfileValue({ label, value }: { label: string; value: unknown }) {
+  let rendered: ReactNode = "—";
+  if (value != null && value !== "") {
+    if (label === "شروع همکاری") rendered = formatDate(String(value));
+    else if (label === "سقف اعتبار") rendered = formatCurrency(Number(value));
+    else if (label === "شرایط پرداخت") rendered = `${formatNumber(Number(value))} روز`;
+    else rendered = String(value);
+  }
+  return (
+    <div className="rounded-lg border bg-muted/30 px-3 py-2">
+      <p className="text-[10px] text-muted-foreground">{label}</p>
+      <p className="mt-0.5 truncate text-sm font-medium tabular-nums">{rendered}</p>
+    </div>
+  );
+}
+
 /* main ------------------------------------------------------------------ */
 export function Customer360({ customerId, onBack }: { customerId: string; onBack: () => void }) {
   const [view, setView] = useState<Customer360Data | null>(null);
   const [error, setError] = useState(false);
   const [summary, setSummary] = useState<SummaryStatus | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const topRef = useRef<HTMLDivElement>(null);
   const stopPollRef = useRef<() => void>(() => {});
 
@@ -391,6 +386,7 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
     topRef.current?.scrollIntoView({ block: "start" });
     setView(null);
     setSummary(null);
+    setRefreshing(false);
     stopPollRef.current();
     stopPollRef.current = () => {};
 
@@ -399,45 +395,13 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         setView(data);
         if (data.summaryReady) {
           setSummary({ status: "ready", summary: data.summary ?? "", generated: false });
-          return;
         }
-        let stopped = false;
-        stopPollRef.current = () => {
-          stopped = true;
-        };
-        let tries = 0;
-        const tick = async () => {
-          if (stopped) return;
-          if (tries > 200) {
-            setPollExhausted(true);
-            return;
-          }
-          tries += 1;
-          try {
-            const res = await fetchCustomer360Summary(customerId);
-            if (res.status === "ready") {
-              setSummary(res);
-              return;
-            }
-          } catch {
-            /* keep polling */
-          }
-          setTimeout(tick, 2500);
-        };
-        tick();
       })
       .catch(() => setError(true));
     return () => stopPollRef.current();
   }, [customerId]);
 
-  // Manual retry when automatic polling gave up (very long LLM latency).
-  const [pollExhausted, setPollExhausted] = useState(false);
-  useEffect(() => {
-    setPollExhausted(false);
-  }, [customerId]);
-
-  function retrySummary() {
-    setPollExhausted(false);
+  function pollUntilReady(id: string) {
     let stopped = false;
     stopPollRef.current();
     stopPollRef.current = () => {
@@ -447,14 +411,15 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
     const tick = async () => {
       if (stopped) return;
       if (tries > 200) {
-        setPollExhausted(true);
+        setRefreshing(false);
         return;
       }
       tries += 1;
       try {
-        const res = await fetchCustomer360Summary(customerId);
+        const res = await fetchCustomer360Summary(id);
         if (res.status === "ready") {
           setSummary(res);
+          setRefreshing(false);
           return;
         }
       } catch {
@@ -465,10 +430,24 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
     tick();
   }
 
+  function refreshSummary() {
+    setRefreshing(true);
+    fetchCustomer360Summary(customerId, true)
+      .then((res) => {
+        if (res.status === "ready") {
+          setSummary(res);
+          setRefreshing(false);
+        } else {
+          pollUntilReady(customerId);
+        }
+      })
+      .catch(() => setRefreshing(false));
+  }
+
   if (error) {
     return (
       <div className="flex h-full items-center justify-center pt-20">
-        <p className="text-sm text-muted-foreground">امکان بارگذاری داده‌های مشتری وجود ندارد.</p>
+        <p className="text-sm text-muted-foreground">امکان بارگذاری داده‌های مشتری وجود ندارد</p>
       </div>
     );
   }
@@ -484,7 +463,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
 
   const barColor = riskTone[view.riskLevel] ?? "bg-amber-500";
   const summaryText = summary?.status === "ready" ? summary.summary : null;
-
   const stateChips: { key: string; label: string }[] = [
     { key: "relationship_health", label: "رابطه" },
     { key: "growth_opportunity", label: "رشد" },
@@ -492,7 +470,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
     { key: "profitability", label: "سودآوری" },
     { key: "value", label: "ارزش" },
   ];
-  // Statuses arrive already translated to Persian; only tone needs mapping.
   const stateTone: Record<string, string> = {
     "ضعیف": "bg-red-500",
     "بحرانی": "bg-red-500",
@@ -517,12 +494,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           <p className="truncate text-sm text-muted-foreground">نمای ۳۶۰ درجه مشتری</p>
         </div>
         <div className="mr-auto flex flex-wrap items-center gap-2">
-          {String(view.customer["Customer_Segment"] ?? "") && (
-            <Badge variant="outline">{String(view.customer["Customer_Segment"])}</Badge>
-          )}
-          {String(view.customer["Customer_Status"] ?? "") && (
-            <Badge variant="outline">{String(view.customer["Customer_Status"])}</Badge>
-          )}
           <Badge
             variant="outline"
             className={cn(
@@ -538,7 +509,27 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         </div>
       </div>
 
-      {/* Intelligence summary (LLM) */}
+      {/* Customer characteristics — first */}
+      <Card className="border-primary/20 bg-gradient-to-l from-primary/5 to-transparent">
+        <CardContent className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center">
+          <div className="flex shrink-0 items-center gap-3">
+            <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-500 text-xl font-bold text-white shadow-sm">
+              {String(customerId).replace(/^C_/, "").slice(0, 2) || "؟"}
+            </span>
+            <div className="leading-tight">
+              <p className="text-base font-semibold tabular-nums">{customerId}</p>
+              <p className="text-xs text-muted-foreground">مشخصات مشتری</p>
+            </div>
+          </div>
+          <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            {view.customerProfile.map((f) => (
+              <ProfileValue key={f.label} label={f.label} value={f.value} />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Intelligence summary (LLM) — cached; regenerated only on refresh */}
       <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
         <CardHeader className="pb-2">
           <div className="flex items-center gap-2">
@@ -550,37 +541,41 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 آماده
               </Badge>
             )}
+            <Button variant="ghost" size="sm" className="gap-1 text-muted-foreground" onClick={refreshSummary} disabled={refreshing} title="محاسبه دوباره خلاصه">
+              <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+              تازه‌سازی
+            </Button>
           </div>
         </CardHeader>
         <CardContent>
           {summaryText ? (
             <SummaryText text={summaryText} />
-          ) : pollExhausted ? (
+          ) : refreshing ? (
+            <SummaryLoader />
+          ) : (
             <div className="flex flex-col items-start gap-3">
               <p className="text-sm text-muted-foreground">
-                آماده‌سازی خلاصه بیشتر از حد انتظار طول کشید. دوباره تلاش کنید.
+                خلاصه هوشمند هنوز برای این مشتری آماده نشده است
               </p>
-              <Button size="sm" onClick={retrySummary}>
-                <Loader2 className="mr-1 h-3.5 w-3.5" />
-                تلاش دوباره
+              <Button size="sm" onClick={refreshSummary}>
+                <Sparkles className="mr-1 h-3.5 w-3.5" />
+                آماده‌سازی خلاصه
               </Button>
             </div>
-          ) : (
-            <SummaryLoader />
           )}
         </CardContent>
       </Card>
 
-      {/* Risk / Sales / Complaints */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <Card className="h-full">
-          <CardHeader className="pb-2">
+      {/* Risk / Sales / Complaints — fixed equal height */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3 md:min-h-[340px]">
+        <Card className="flex h-full flex-col">
+          <CardHeader className="shrink-0 pb-2">
             <div className="flex items-center gap-2">
               <Activity className="h-4 w-4 text-muted-foreground" />
               <CardTitle className="text-sm">وضعیت مشتری</CardTitle>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="flex flex-1 flex-col">
             <div className="flex items-end gap-1">
               <span className="text-4xl font-semibold">{view.riskLevel}</span>
             </div>
@@ -589,19 +584,21 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 <div className={cn("h-full rounded-full", barColor)} style={{ width: `${view.riskScore}%` }} />
               </div>
             )}
-            {stateChips
-              .filter((c) => view.state[c.key] && view.state[c.key].status)
-              .map((c) => {
-                const st = view.state[c.key];
-                const tone = stateTone[st.status] ?? "bg-muted-foreground";
-                return (
-                  <span key={c.key} className="mt-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                    <span className={cn("h-1.5 w-1.5 rounded-full", tone)} />
-                    {c.label}: {st.status}
-                  </span>
-                );
-              })}
-            <div className="mt-4 space-y-3 border-t pt-4">
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {stateChips
+                .filter((c) => view.state[c.key] && view.state[c.key].status)
+                .map((c) => {
+                  const st = view.state[c.key];
+                  const tone = stateTone[st.status] ?? "bg-muted-foreground";
+                  return (
+                    <span key={c.key} className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                      <span className={cn("h-1.5 w-1.5 rounded-full", tone)} />
+                      {c.label}: {st.status}
+                    </span>
+                  );
+                })}
+            </div>
+            <div className="mt-auto space-y-3 border-t pt-3">
               {view.riskSignals.slice(0, 3).map((s) => (
                 <SignalRow key={s.label + s.detail} signal={s} />
               ))}
@@ -609,30 +606,37 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           </CardContent>
         </Card>
 
-        <Card className="h-full">
-          <CardHeader className="pb-2">
+        <Card className="flex h-full flex-col">
+          <CardHeader className="shrink-0 pb-2">
             <div className="flex items-center gap-2">
               <ShoppingCart className="h-4 w-4 text-muted-foreground" />
               <CardTitle className="text-sm">نمای فروش</CardTitle>
             </div>
           </CardHeader>
-          <CardContent className="space-y-2.5">
-            <MetaRow label="درآمد کل" value={formatCurrency(view.revenue)} />
-            <MetaRow label="سفارش‌ها" value={formatNumber(view.orders)} />
-            <MetaRow label="میانگین هر سفارش" value={formatCurrency(view.avgOrderValue)} />
-            <MetaRow label="آخرین خرید" value={formatDate(view.lastPurchase)} />
-            <MetaRow label="محصول اصلی" value={view.topProduct ?? "—"} />
+          <CardContent className="flex flex-1 flex-col justify-between gap-2.5">
+            <div className="space-y-2.5">
+              <MetaRow label="درآمد کل" value={formatCurrency(view.revenue)} />
+              <MetaRow label="سفارش‌ها" value={formatNumber(view.orders)} />
+              <MetaRow label="میانگین هر سفارش" value={formatCurrency(view.avgOrderValue)} />
+              <MetaRow label="آخرین خرید" value={formatDate(view.lastPurchase)} />
+              <MetaRow label="محصول اصلی" value={view.topProduct ?? "—"} />
+            </div>
+            <div className="space-y-2.5 border-t pt-2.5">
+              <MetaRow label="تعاملات" value={formatNumber(view.interactionsCount)} />
+              <MetaRow label="مطالبات عقب‌افتاده" value={formatCurrency(view.overdueAmount)} />
+              <MetaRow label="چک برگشتی" value={formatNumber(view.bouncedChecks)} />
+            </div>
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="pb-2">
+        <Card className="flex h-full flex-col">
+          <CardHeader className="shrink-0 pb-2">
             <div className="flex items-center gap-2">
               <MessageSquareWarning className="h-4 w-4 text-muted-foreground" />
               <CardTitle className="text-sm">شکایات</CardTitle>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="flex flex-1 flex-col">
             <div className="flex items-center gap-6">
               <div>
                 <span className="text-3xl font-semibold tabular-nums">{formatNumber(view.complaints)}</span>
@@ -647,84 +651,83 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 <p className="text-xs text-muted-foreground">رویداد وصول</p>
               </div>
             </div>
-            {view.complaintReasons.length > 0 ? (
-              <ul className="mt-4 space-y-2 border-t pt-4">
-                {view.complaintReasons.map((r) => (
-                  <li key={r.reason} className="flex items-center justify-between text-xs">
-                    <span className="text-muted-foreground">{r.reason}</span>
-                    <span className="font-medium tabular-nums">{formatNumber(r.count)}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-4 border-t pt-4 text-xs text-muted-foreground">
-                در این بازه شکایتی ثبت نشده است.
-              </p>
-            )}
+            <div className="mt-auto border-t pt-3">
+              {view.complaintReasons.length > 0 ? (
+                <ul className="space-y-2">
+                  {view.complaintReasons.map((r) => (
+                    <li key={r.reason} className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">{r.reason}</span>
+                      <span className="font-medium tabular-nums">{formatNumber(r.count)}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-muted-foreground">در این بازه شکایتی ثبت نشده است</p>
+              )}
+            </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Sections — varied responsive widths (dashboard/analyses style) */}
+      {/* Sections — varied responsive widths, all items visible with scroll */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         <div className="xl:col-span-5">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Activity}
             title="نشانه‌های وضعیت مشتری"
             count={view.riskSignals.length}
-            preview={<div className="space-y-3">{view.riskSignals.slice(0, 3).map((s) => <SignalRow key={s.label + s.detail} signal={s} />)}</div>}
-            full={<div className="max-h-80 space-y-3 overflow-y-auto scrollbar-thin">{view.riskSignals.map((s) => <SignalRow key={s.label + s.detail} signal={s} />)}</div>}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.riskSignals} render={(s) => <SignalRow signal={s} />} empty="نشانه‌ای ثبت نشده است" />
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-7">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Lightbulb}
             title="اقدام پیشنهادی"
             count={view.actions.length}
-            preview={<div className="space-y-2">{view.actions.slice(0, 2).map((a) => <ActionItem key={a.id} action={a} />)}</div>}
-            full={<div className="space-y-2">{view.actions.map((a) => <ActionItem key={a.id} action={a} />)}</div>}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.actions} render={(a) => <ActionItem action={a} />} empty="اقدام پیشنهادی‌ای نیست" />
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-7">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={MessageSquareWarning}
             title="شکایات و عوامل آن"
             count={view.complaintList.length}
-            preview={<ListBody items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است." />}
-            full={<FullList items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است." />}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است" />
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-5">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Handshake}
             title="تعاملات و پیگیری‌ها"
             count={view.interactionsCount}
-            preview={<ListBody items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است." />}
-            full={<FullList items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است." />}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است" />
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-7">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Receipt}
             title="سفارش‌ها و تراکنش‌ها"
             count={view.transactions.length}
-            preview={<ListBody items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است." />}
-            full={<FullList items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است." />}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است" />
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-5">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={ClipboardList}
             title="درخواست‌های توسعه محصول"
             count={view.devCount}
@@ -735,14 +738,14 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 </Badge>
               ) : undefined
             }
-            preview={<ListBody items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است." />}
-            full={<FullList items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است." />}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است" />
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-5">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Tags}
             title="پیشنهادهای قیمتی"
             count={view.offers.length}
@@ -753,14 +756,14 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 </Badge>
               ) : undefined
             }
-            preview={<ListBody items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است." />}
-            full={<FullList items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است." />}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است" />
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-7">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Wallet}
             title="وصول و پرداخت‌ها"
             count={view.collectionsCount}
@@ -771,47 +774,24 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 </Badge>
               ) : undefined
             }
-            preview={<ListBody items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است." />}
-            full={<FullList items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است." />}
-          />
+            scrollHeight="max-h-80"
+          >
+            <SectionList items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است" />
+          </SectionCard>
         </div>
 
         {view.marketSignals.length > 0 && (
           <div className="xl:col-span-5">
-            <ExpandableSection
-              className="h-full"
+            <SectionCard
               icon={MailQuestion}
               title="نشانه‌های بازار"
               count={view.marketSignals.length}
-              preview={<ListBody items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است." />}
-              full={<FullList items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است." />}
-            />
+              scrollHeight="max-h-80"
+            >
+              <SectionList items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است" />
+            </SectionCard>
           </div>
         )}
-
-        <div className="xl:col-span-7">
-          <ExpandableSection
-            className="h-full"
-            icon={FileText}
-            title="مشخصات مشتری"
-            alwaysExpandable
-            preview={
-              <div className="space-y-2.5">
-                <MetaRow label="بخش بازار" value={String(view.customer["Customer_Segment"] ?? "—")} />
-                <MetaRow label="وضعیت" value={String(view.customer["Customer_Status"] ?? "—")} />
-                <MetaRow label="نماینده فروش" value={String(view.customer["Sales_Rep_ID"] ?? "—")} />
-                <MetaRow label="شروع همکاری" value={formatDate(String(view.customer["Relationship_Start_Date"] ?? ""))} />
-              </div>
-            }
-            full={
-              <div className="max-h-96 space-y-2.5 overflow-y-auto scrollbar-thin">
-                {Object.entries(view.customer).map(([k, v]) => (
-                  <MetaRow key={k} label={k} value={v == null ? "—" : String(v)} />
-                ))}
-              </div>
-            }
-          />
-        </div>
       </div>
     </div>
   );

@@ -67,15 +67,24 @@
 }
 
 @layer utilities {
+  /* Design-system scrollbars: transparent track, subtle rounded thumb. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+  }
   .scrollbar-thin::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
-  .scrollbar-thin::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-border;
-  }
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full;
+    background: hsl(var(--muted-foreground) / 0.35);
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.55);
   }
 }
 

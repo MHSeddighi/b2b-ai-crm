@@ -22,7 +22,7 @@ _CACHE_ROOT = settings.repo_root / "data" / "cache"
 
 # Bump when the cached payload/summary shape or its producing code changes, so
 # stale entries from older versions are recomputed once after an update.
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 
 def _path(kind: str, key: str) -> Path:

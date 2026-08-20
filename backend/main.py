@@ -89,11 +89,11 @@ async def analyses() -> dict[str, Any]:
 
 
 @app.get("/api/dashboard/intelligence")
-async def dashboard_intelligence() -> dict[str, Any]:
-    """LLM portfolio summary for the dashboard (cached; poll while generating)."""
+async def dashboard_intelligence(refresh: bool = False) -> dict[str, Any]:
+    """LLM portfolio summary for the dashboard (cached; refresh=1 regenerates)."""
     from backend.agents import intel_summary
     det = api_data.dashboard()
-    return await intel_summary.dashboard_summary(det)
+    return await intel_summary.dashboard_summary(det, refresh=refresh)
 
 
 @app.get("/api/customers")
@@ -107,13 +107,14 @@ async def customer_360(customer_id: str) -> dict[str, Any] | None:
 
 
 @app.get("/api/customers/{customer_id}/360/summary")
-async def customer_360_summary(customer_id: str) -> dict[str, Any]:
-    """LLM intelligence summary for one customer (cached; poll while generating)."""
+async def customer_360_summary(customer_id: str,
+                               refresh: bool = False) -> dict[str, Any]:
+    """LLM intelligence summary for one customer (cached; refresh=1 regenerates)."""
     from backend.agents import intel_summary
     payload = api_data.customer_360(customer_id)
     if payload is None:
         return {"status": "not_found", "summary": None, "generated": False}
-    return await intel_summary.customer_summary(payload)
+    return await intel_summary.customer_summary(payload, refresh=refresh)
 
 
 # --- Deterministic Customer Intelligence (Signal -> State -> Action) ---

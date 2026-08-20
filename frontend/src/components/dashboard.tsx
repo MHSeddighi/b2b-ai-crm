@@ -7,6 +7,7 @@ import {
   Loader2,
   MessageSquareWarning,
   PieChart as PieChartIcon,
+  RefreshCw,
   Sparkles,
   Target,
   TrendingDown,
@@ -20,16 +21,17 @@ import {
   BarChart,
   Cell,
   Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
   CartesianGrid,
-  PieChart,
 } from "recharts";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   fetchDashboard,
   fetchDashboardIntelligence,
@@ -40,7 +42,7 @@ import {
   type SummaryStatus,
 } from "@/lib/api";
 import { formatCompact, formatCurrency, formatNumber, cn } from "@/lib/utils";
-import { ExpandableSection } from "@/components/expandable";
+import { SectionCard } from "@/components/section-card";
 
 const kpiIcons: Record<string, typeof Users> = {
   "کل مشتریان": Users,
@@ -111,7 +113,7 @@ function SummaryText({ text }: { text: string }) {
   return (
     <div className="space-y-2">
       {lines.map((line, i) => {
-        const trimmed = line.trim();
+        const trimmed = line.trim().replace(/[.\u06D4]+$/, "");
         if (trimmed.startsWith("- ") || trimmed.startsWith("• ")) {
           return (
             <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
@@ -144,10 +146,10 @@ function RecommendationCard({ rec, wide }: { rec: IncomeRecommendation; wide?: b
   return (
     <div
       className={cn(
-        "flex h-full flex-col rounded-xl border p-4 transition-colors",
-        rec.tone === "positive" && "border-emerald-500/30 bg-emerald-500/5",
-        rec.tone === "warning" && "border-amber-500/30 bg-amber-500/5",
-        rec.tone === "negative" && "border-red-500/30 bg-red-500/5"
+        "flex h-full flex-col rounded-xl border p-4 backdrop-blur-md transition-colors",
+        rec.tone === "positive" && "border-emerald-500/30 bg-emerald-500/10",
+        rec.tone === "warning" && "border-amber-500/30 bg-amber-500/10",
+        rec.tone === "negative" && "border-red-500/30 bg-red-500/10"
       )}
     >
       <div className="flex items-start gap-3">
@@ -238,21 +240,20 @@ function ComplaintTrendChart({ data }: { data: DashboardData["complaintTrend"] }
 }
 
 function MiniDistribution({ title, data }: { title: string; data: DistributionSlice[] }) {
-  const total = data.reduce((acc, d) => acc + d.value, 0);
   if (data.length === 0) {
     return (
       <div>
         <p className="mb-2 text-xs font-semibold text-muted-foreground">{title}</p>
         <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">
-          داده‌ای موجود نیست.
+          داده‌ای موجود نیست
         </p>
       </div>
     );
   }
   return (
     <div>
-      <p className="mb-2 text-xs font-semibold text-muted-foreground">{title}</p>
-      <div className="flex items-center gap-4">
+      <p className="mb-3 text-xs font-semibold text-muted-foreground">{title}</p>
+      <div className="flex items-center gap-5">
         <div className="h-36 w-36 shrink-0">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
@@ -265,19 +266,14 @@ function MiniDistribution({ title, data }: { title: string; data: DistributionSl
             </PieChart>
           </ResponsiveContainer>
         </div>
-        <div className="min-w-0 flex-1 space-y-2">
+        <div className="min-w-0 flex-1 space-y-2.5">
           {data.map((d, i) => (
-            <div key={d.name} className="flex items-center justify-between gap-2 text-xs">
-              <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+            <div key={d.name} className="flex items-center justify-between gap-3 text-xs">
+              <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
                 <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: pieColors[i % pieColors.length] }} />
                 <span className="truncate">{d.name}</span>
               </span>
-              <span className="shrink-0 font-medium tabular-nums">
-                {formatCompact(d.value)}
-                <span className="mr-1 text-[10px] text-muted-foreground">
-                  {Math.round((d.value / (total || 1)) * 100)}٪
-                </span>
-              </span>
+              <span className="shrink-0 font-medium tabular-nums">{formatCompact(d.value)}</span>
             </div>
           ))}
         </div>
@@ -297,7 +293,7 @@ function CombinedDistribution({ data }: { data: DashboardData }) {
         <CardDescription>بخش بازار و وضعیت مشتریان در یک نگاه</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-2 lg:gap-12">
           <MiniDistribution title="بخش بازار (سگمنت)" data={data.segmentDistribution} />
           <MiniDistribution title="وضعیت مشتری" data={data.statusDistribution} />
         </div>
@@ -312,41 +308,65 @@ export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<SummaryStatus | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const stopPollRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     stopPollRef.current();
     stopPollRef.current = () => {};
-    fetchDashboard().then(setData).catch(() => setError("امکان بارگذاری داده‌ها وجود ندارد."));
+    fetchDashboard().then(setData).catch(() => setError("امکان بارگذاری داده‌ها وجود ندارد"));
+    // Read the cached summary only — never trigger regeneration on load.
     fetchDashboardIntelligence()
       .then((res) => {
-        setSummary(res);
-        if (res.status === "generating") {
-          let stopped = false;
-          stopPollRef.current = () => {
-            stopped = true;
-          };
-          let tries = 0;
-          const tick = async () => {
-            if (stopped || tries > 200) return; // ~8 minutes budget
-            tries += 1;
-            try {
-              const res2 = await fetchDashboardIntelligence();
-              if (res2.status === "ready") {
-                setSummary(res2);
-                return;
-              }
-            } catch {
-              /* keep polling */
-            }
-            setTimeout(tick, 2500);
-          };
-          tick();
-        }
+        if (res.status === "ready") setSummary(res);
+        else setSummary(null);
       })
       .catch(() => setSummary(null));
     return () => stopPollRef.current();
   }, []);
+
+  function pollUntilReady() {
+    let stopped = false;
+    stopPollRef.current();
+    stopPollRef.current = () => {
+      stopped = true;
+    };
+    let tries = 0;
+    const tick = async () => {
+      if (stopped) return;
+      if (tries > 200) {
+        setRefreshing(false);
+        return;
+      }
+      tries += 1;
+      try {
+        const res = await fetchDashboardIntelligence();
+        if (res.status === "ready") {
+          setSummary(res);
+          setRefreshing(false);
+          return;
+        }
+      } catch {
+        /* keep polling */
+      }
+      setTimeout(tick, 2500);
+    };
+    tick();
+  }
+
+  function refreshSummary() {
+    setRefreshing(true);
+    fetchDashboardIntelligence(true)
+      .then((res) => {
+        if (res.status === "ready") {
+          setSummary(res);
+          setRefreshing(false);
+        } else {
+          pollUntilReady();
+        }
+      })
+      .catch(() => setRefreshing(false));
+  }
 
   if (error) {
     return (
@@ -361,7 +381,7 @@ export function Dashboard() {
       <div className="space-y-6">
         <div className="flex flex-col gap-1 pt-4">
           <h1 className="text-2xl font-semibold tracking-tight">داشبورد</h1>
-          <p className="text-sm text-muted-foreground">نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار.</p>
+          <p className="text-sm text-muted-foreground">نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار</p>
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[0, 1, 2, 3].map((i) => (
@@ -385,7 +405,7 @@ export function Dashboard() {
     <div className="space-y-6">
       <div className="flex flex-col gap-1 pt-4">
         <h1 className="text-2xl font-semibold tracking-tight">داشبورد</h1>
-        <p className="text-sm text-muted-foreground">نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار.</p>
+        <p className="text-sm text-muted-foreground">نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار</p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -394,7 +414,7 @@ export function Dashboard() {
         ))}
       </div>
 
-      {/* LLM overall analysis — full width */}
+      {/* LLM overall analysis — cached; regenerated only on refresh */}
       <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
         <CardHeader className="pb-2">
           <div className="flex items-center gap-2">
@@ -406,10 +426,28 @@ export function Dashboard() {
                 آماده
               </Badge>
             )}
+            <Button variant="ghost" size="sm" className="gap-1 text-muted-foreground" onClick={refreshSummary} disabled={refreshing} title="محاسبه دوباره تحلیل کلی">
+              <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+              تازه‌سازی
+            </Button>
           </div>
         </CardHeader>
         <CardContent>
-          {summaryText ? <SummaryText text={summaryText} /> : <SummaryLoader />}
+          {summaryText ? (
+            <SummaryText text={summaryText} />
+          ) : refreshing ? (
+            <SummaryLoader />
+          ) : (
+            <div className="flex flex-col items-start gap-3">
+              <p className="text-sm text-muted-foreground">
+                تحلیل کلی هوشمند هنوز آماده نشده است؛ برای محاسبه دکمه «تازه‌سازی» را بزنید
+              </p>
+              <Button size="sm" onClick={refreshSummary}>
+                <Sparkles className="mr-1 h-3.5 w-3.5" />
+                آماده‌سازی تحلیل
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -443,8 +481,7 @@ export function Dashboard() {
       {/* Overall analysis sections — varied responsive widths */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         <div className="xl:col-span-7">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={AlertTriangle}
             title="مشتریان در معرض از دست رفتن"
             count={intel.at_risk.count}
@@ -453,33 +490,11 @@ export function Dashboard() {
                 {formatCurrency(intel.at_risk.revenue)} در خطر
               </Badge>
             }
-            preview={
-              intel.at_risk.top.length === 0 ? (
-                <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">مشتری در معرض از دست رفتنی یافت نشد.</p>
-              ) : (
+          >
+            {intel.at_risk.top.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">مشتری در معرض از دست رفتنی یافت نشد</p>
+            ) : (
               <div className="space-y-2">
-                {intel.at_risk.top.slice(0, 3).map((r) => (
-                  <div key={r.customer_id} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
-                    <div className="min-w-0 leading-tight">
-                      <p className="text-xs font-medium tabular-nums">{r.customer_id}</p>
-                      <p className="text-[10px] text-muted-foreground">
-                        {formatNumber(r.complaints)} شکایت · {formatNumber(r.orders)} سفارش
-                        {r.days_since != null && <span> · آخرین خرید {formatNumber(r.days_since)} روز پیش</span>}
-                      </p>
-                    </div>
-                    <div className="shrink-0 text-left">
-                      <p className="text-xs font-medium tabular-nums">{formatCurrency(r.revenue)}</p>
-                      <span className={cn("inline-block rounded-md px-1.5 py-0.5 text-[10px]", riskChip[levelOf(r.risk_score)] ?? riskChip["متوسط"])}>
-                        {levelOf(r.risk_score)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              )
-            }
-            full={
-              <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
                 {intel.at_risk.top.map((r) => (
                   <div key={r.customer_id} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
                     <div className="min-w-0 leading-tight">
@@ -499,22 +514,21 @@ export function Dashboard() {
                   </div>
                 ))}
               </div>
-            }
-          />
+            )}
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-5">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={MessageSquareWarning}
             title="موضوع‌های پرتکرار شکایت"
             count={intel.complaint_themes.length}
-            preview={
-              intel.complaint_themes.length === 0 ? (
-                <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">شکایتی ثبت نشده است.</p>
-              ) : (
+          >
+            {intel.complaint_themes.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">شکایتی ثبت نشده است</p>
+            ) : (
               <div className="space-y-2.5">
-                {intel.complaint_themes.slice(0, 3).map((t) => (
+                {intel.complaint_themes.map((t) => (
                   <div key={t.name} className="flex items-center gap-3">
                     <span className="w-32 truncate text-xs text-muted-foreground">{t.name}</span>
                     <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
@@ -524,51 +538,20 @@ export function Dashboard() {
                   </div>
                 ))}
               </div>
-              )
-            }
-            full={
-              <div className="max-h-80 space-y-2.5 overflow-y-auto scrollbar-thin">
-                {intel.complaint_themes.map((t) => (
-                  <div key={t.name} className="flex items-center gap-3">
-                    <span className="w-40 truncate text-xs text-muted-foreground">{t.name}</span>
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-amber-500/70" style={{ width: `${(t.count / maxTheme) * 100}%` }} />
-                    </div>
-                    <span className="w-10 text-left text-xs font-medium tabular-nums">{formatNumber(t.count)}</span>
-                  </div>
-                ))}
-              </div>
-            }
-          />
+            )}
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-5">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Target}
             title="اثربخشی پیشنهادها"
             count={intel.offer_effectiveness.length}
-            preview={
-              intel.offer_effectiveness.length === 0 ? (
-                <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">پیشنهادی ثبت نشده است.</p>
-              ) : (
+          >
+            {intel.offer_effectiveness.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">پیشنهادی ثبت نشده است</p>
+            ) : (
               <div className="space-y-2.5">
-                {intel.offer_effectiveness.slice(0, 3).map((o) => (
-                  <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
-                    <p className="text-xs font-medium">{o.type}</p>
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-20 overflow-hidden rounded-full bg-muted">
-                        <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${o.rate * 100}%` }} />
-                      </div>
-                      <span className="text-xs font-medium tabular-nums">{formatNumber(Math.round(o.rate * 100))}٪</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              )
-            }
-            full={
-              <div className="max-h-80 space-y-2.5 overflow-y-auto scrollbar-thin">
                 {intel.offer_effectiveness.map((o) => (
                   <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
                     <p className="text-xs font-medium">
@@ -584,17 +567,16 @@ export function Dashboard() {
                   </div>
                 ))}
               </div>
-            }
-          />
+            )}
+          </SectionCard>
         </div>
 
         <div className="xl:col-span-7">
-          <ExpandableSection
-            className="h-full"
+          <SectionCard
             icon={Landmark}
             title="مطالبات، چک‌های برگشتی و مشتریان قدیمی"
-            alwaysExpandable
-            preview={
+          >
+            <div className="space-y-2.5">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <div className="rounded-lg border bg-muted/30 p-3 text-center">
                   <p className="text-xl font-semibold tabular-nums">{formatCurrency(intel.collection_risk.overdue)}</p>
@@ -609,30 +591,26 @@ export function Dashboard() {
                   <p className="mt-1 text-[11px] text-muted-foreground">مشتری قدیمی ارزشمند</p>
                 </div>
               </div>
-            }
-            full={
-              <div className="space-y-2.5">
-                <div className="rounded-lg border bg-muted/30 p-3">
-                  <p className="text-xs text-muted-foreground">مجموع درآمد قابل بازیابی از مشتریان قدیمی (بیش از یک سال بدون خرید)</p>
-                  <p className="mt-1 text-lg font-semibold tabular-nums">{formatCurrency(intel.winback.revenue)}</p>
-                </div>
-                <div className="rounded-lg border bg-muted/30 p-3">
-                  <p className="mb-2 text-xs text-muted-foreground">بیشترین سهم درآمد بر اساس بخش بازار</p>
-                  <div className="space-y-2">
-                    {intel.segment_share.slice(0, 4).map((s) => (
-                      <div key={s.name} className="flex items-center gap-3">
-                        <span className="w-16 truncate text-xs text-muted-foreground">{s.name}</span>
-                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                          <div className="h-full rounded-full bg-primary/70" style={{ width: `${(s.value / (intel.segment_share[0]?.value || 1)) * 100}%` }} />
-                        </div>
-                        <span className="w-16 text-left text-xs font-medium tabular-nums">{formatCurrency(s.value)}</span>
+              <div className="rounded-lg border bg-muted/30 p-3">
+                <p className="text-xs text-muted-foreground">مجموع درآمد قابل بازیابی از مشتریان قدیمی (بیش از یک سال بدون خرید)</p>
+                <p className="mt-1 text-lg font-semibold tabular-nums">{formatCurrency(intel.winback.revenue)}</p>
+              </div>
+              <div className="rounded-lg border bg-muted/30 p-3">
+                <p className="mb-2 text-xs text-muted-foreground">بیشترین سهم درآمد بر اساس بخش بازار</p>
+                <div className="space-y-2">
+                  {intel.segment_share.slice(0, 4).map((s) => (
+                    <div key={s.name} className="flex items-center gap-3">
+                      <span className="w-16 truncate text-xs text-muted-foreground">{s.name}</span>
+                      <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full bg-primary/70" style={{ width: `${(s.value / (intel.segment_share[0]?.value || 1)) * 100}%` }} />
                       </div>
-                    ))}
-                  </div>
+                      <span className="w-16 text-left text-xs font-medium tabular-nums">{formatCurrency(s.value)}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
-            }
-          />
+            </div>
+          </SectionCard>
         </div>
       </div>
     </div>

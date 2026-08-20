@@ -86,7 +86,11 @@ def test_customer_summary_cached_and_reused(monkeypatch):
 
     async def run():
         payload = api_data.customer_360(cid)
-        first = await intel_summary.customer_summary(payload)
+        # Without cache and without refresh -> not_ready (never auto-generates)
+        not_ready = await intel_summary.customer_summary(payload)
+        assert not_ready["status"] == "not_ready"
+        # Explicit refresh triggers generation once, then it is cached
+        first = await intel_summary.customer_summary(payload, refresh=True)
         assert first["status"] == "ready"
         assert first["generated"] is True
         second = await intel_summary.customer_summary(payload)
@@ -108,7 +112,9 @@ def test_dashboard_summary_cached_and_reused(monkeypatch):
 
     async def run():
         det = api_data.dashboard()
-        first = await intel_summary.dashboard_summary(det)
+        not_ready = await intel_summary.dashboard_summary(det)
+        assert not_ready["status"] == "not_ready"
+        first = await intel_summary.dashboard_summary(det, refresh=True)
         assert first["status"] == "ready"
         second = await intel_summary.dashboard_summary(det)
         assert second["generated"] is False
@@ -162,6 +168,16 @@ def test_360_payload_translated_fields_are_persian():
         assert re.search(r"[a-zA-Z]", v["status"]) is None, v["status"]
         for reason in v["reasons"]:
             assert re.search(r"[a-zA-Z]", reason) is None, reason
+
+
+def test_customer_360_profile_is_curated_persian():
+    payload = api_data.customer_360(_any_customer())
+    prof = payload["customerProfile"]
+    assert prof, "profile should not be empty"
+    for f in prof:
+        assert f["label"]
+        # raw internal ids/system fields must not leak into the profile
+        assert not any(x in f["label"] for x in ("ID", "Source", "Location")), f["label"]
 
 
 def test_analyses_cached():

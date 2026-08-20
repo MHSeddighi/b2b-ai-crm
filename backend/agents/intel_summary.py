@@ -189,15 +189,20 @@ _GUARD_LOCK = asyncio.Lock()
 
 
 async def _generate(kind: str, key: str, snapshot: dict[str, Any],
-                    prompt_builder, fp: str) -> dict[str, Any]:
+                    prompt_builder, fp: str, refresh: bool = False) -> dict[str, Any]:
     """Return ``{"status": "ready", "summary": ..., "generated": bool}``.
 
-    Cached reads are instant; a computation already in flight for the same key
-    returns ``{"status": "generating"}`` so the caller can poll.
-    """
-    entry = store.load(kind, key)
-    if entry is not None and entry.get("fingerprint") == fp:
-        return {"status": "ready", "summary": entry["value"], "generated": False}
+    Cached reads are instant and never trigger regeneration. With
+    ``refresh=True`` the cache is bypassed and the summary is recomputed (an
+    in-flight computation for the same key returns ``{"status": "generating"}``
+    so the caller can poll)."""
+    if not refresh:
+        entry = store.load(kind, key)
+        if entry is not None and entry.get("fingerprint") == fp:
+            return {"status": "ready", "summary": entry["value"], "generated": False}
+        # Nothing cached and no explicit refresh: report not-ready without
+        # triggering any LLM work (regeneration is a deliberate user action).
+        return {"status": "not_ready", "summary": None, "generated": False}
 
     async with _GUARD_LOCK:
         if key in _COMPUTING:
@@ -237,17 +242,20 @@ def _fallback_summary(kind: str, user_prompt: str) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-async def customer_summary(payload: dict[str, Any]) -> dict[str, Any]:
+async def customer_summary(payload: dict[str, Any],
+                           refresh: bool = False) -> dict[str, Any]:
     """LLM summary for one customer (cached by fingerprint of its /360 payload)."""
     snapshot = _customer_snapshot(payload)
     fp = store.fingerprint(snapshot)
     key = str(payload.get("customer", {}).get("Customer_ID") or "unknown")
-    return await _generate("customer360", key, snapshot, _customer_prompt, fp)
+    return await _generate("customer360", key, snapshot, _customer_prompt,
+                           fp, refresh=refresh)
 
 
-async def dashboard_summary(det: dict[str, Any]) -> dict[str, Any]:
+async def dashboard_summary(det: dict[str, Any],
+                            refresh: bool = False) -> dict[str, Any]:
     """LLM portfolio summary for the dashboard (cached by data fingerprint)."""
     snapshot = _dashboard_snapshot(det)
     fp = store.fingerprint(snapshot)
     return await _generate("dashboard", "overview", snapshot,
-                           _dashboard_prompt, fp)
+                           _dashboard_prompt, fp, refresh=refresh)
