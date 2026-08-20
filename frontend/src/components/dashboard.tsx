@@ -488,59 +488,6 @@ export function Dashboard() {
           </SectionCard>
         </div>
 
-        <div className="xl:col-span-6">
-          <SectionCard
-            icon={MessageSquareWarning}
-            title="موضوع‌های پرتکرار شکایت"
-            count={intel.complaint_themes.length}
-          >
-            {intel.complaint_themes.length === 0 ? (
-              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("شکایتی ثبت نشده است")}</p>
-            ) : (
-              <div className="space-y-2.5">
-                {intel.complaint_themes.map((t) => (
-                  <div key={t.name} className="flex items-center gap-3">
-                    <span className="w-32 truncate text-xs text-muted-foreground">{t.name}</span>
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-amber-500/70" style={{ width: `${(t.count / maxTheme) * 100}%` }} />
-                    </div>
-                    <span className="w-10 text-left text-xs font-medium tabular-nums">{formatNumber(t.count)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </SectionCard>
-        </div>
-
-        <div className="xl:col-span-6">
-          <SectionCard
-            icon={Target}
-            title="اثربخشی پیشنهادها"
-            count={intel.offer_effectiveness.length}
-          >
-            {intel.offer_effectiveness.length === 0 ? (
-              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("پیشنهادی ثبت نشده است")}</p>
-            ) : (
-              <div className="space-y-2.5">
-                {intel.offer_effectiveness.map((o) => (
-                  <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
-                    <p className="text-xs font-medium">
-                      {o.type}
-                      <span className="mr-1 text-[10px] text-muted-foreground">({formatNumber(o.count)} پیشنهاد)</span>
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <div className="h-2 w-20 overflow-hidden rounded-full bg-muted">
-                        <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${o.rate * 100}%` }} />
-                      </div>
-                      <span className="text-xs font-medium tabular-nums">{formatNumber(Math.round(o.rate * 100))}٪</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </SectionCard>
-        </div>
-
         <div className="xl:col-span-5">
           <SectionCard
             icon={Landmark}
@@ -582,6 +529,61 @@ export function Dashboard() {
             </div>
           </SectionCard>
         </div>
+        <div className="xl:col-span-6">
+          <SectionCard
+            bodyHeight="h-48"
+            icon={MessageSquareWarning}
+            title="موضوع‌های پرتکرار شکایت"
+            count={intel.complaint_themes.length}
+          >
+            {intel.complaint_themes.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("شکایتی ثبت نشده است")}</p>
+            ) : (
+              <div className="space-y-2.5">
+                {intel.complaint_themes.map((t) => (
+                  <div key={t.name} className="flex items-center gap-3">
+                    <span className="w-32 truncate text-xs text-muted-foreground">{t.name}</span>
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                      <div className="h-full rounded-full bg-amber-500/70" style={{ width: `${(t.count / maxTheme) * 100}%` }} />
+                    </div>
+                    <span className="w-10 text-left text-xs font-medium tabular-nums">{formatNumber(t.count)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+        </div>
+
+        <div className="xl:col-span-6">
+          <SectionCard
+            bodyHeight="h-48"
+            icon={Target}
+            title="اثربخشی پیشنهادها"
+            count={intel.offer_effectiveness.length}
+          >
+            {intel.offer_effectiveness.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("پیشنهادی ثبت نشده است")}</p>
+            ) : (
+              <div className="space-y-2.5">
+                {intel.offer_effectiveness.map((o) => (
+                  <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
+                    <p className="text-xs font-medium">
+                      {o.type}
+                      <span className="mr-1 text-[10px] text-muted-foreground">({formatNumber(o.count)} پیشنهاد)</span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <div className="h-2 w-20 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${o.rate * 100}%` }} />
+                      </div>
+                      <span className="text-xs font-medium tabular-nums">{formatNumber(Math.round(o.rate * 100))}٪</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+        </div>
+
       </div>
     </div>
   );
