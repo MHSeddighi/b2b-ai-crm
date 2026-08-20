@@ -15,7 +15,7 @@ import type {
   ThreadMessage,
 } from "@assistant-ui/react";
 
-import { fetchCopilotAnswerStream, type ChatHistoryItem } from "@/lib/chat-api";
+import { fetchCopilotAnswerStream, type ChatHistoryItem, type TraceEvent } from "@/lib/chat-api";
 import type { Block, SqlResult } from "@/lib/blocks";
 
 export const UNREACHABLE_MSG =
@@ -67,18 +67,26 @@ function buildHistory(messages: readonly ThreadMessage[]): ChatHistoryItem[] {
 
 /**
  * Build the full accumulated content from streaming state.
- * Order: reasoning (thinking/status), blocks (charts/cards), text (narrative).
+ * Order: reasoning (thinking/status), trace (debug events), blocks (charts/cards), text (narrative).
  */
 function buildContent(
   reasoning: string,
   narrative: string,
   blocks: Block[],
   results: Record<string, SqlResult>,
+  trace: TraceEvent[],
   status: "running" | "complete",
 ): ThreadAssistantMessagePart[] {
   const parts: ThreadAssistantMessagePart[] = [];
   if (reasoning) {
     parts.push({ type: "reasoning", text: reasoning, status: { type: status } });
+  }
+  if (trace.length) {
+    parts.push({
+      type: "data",
+      name: "trace",
+      data: { events: trace },
+    } as ThreadAssistantMessagePart);
   }
   if (blocks.length) {
     parts.push({
@@ -93,7 +101,10 @@ function buildContent(
   return parts;
 }
 
-export function createCustomer360Adapter(sessionId: string): ChatModelAdapter {
+export function createCustomer360Adapter(
+  sessionId: string,
+  debug = false,
+): ChatModelAdapter {
   return {
     async *run({ messages, abortSignal }): AsyncGenerator<ChatModelRunResult, void> {
       const question = lastUserText(messages);
@@ -103,11 +114,12 @@ export function createCustomer360Adapter(sessionId: string): ChatModelAdapter {
       let narrative = "";
       let blocks: Block[] = [];
       let results: Record<string, SqlResult> = {};
+      const trace: TraceEvent[] = [];
       // Emit a real part immediately so the message never sits at an empty
       // loading state while the (potentially slow) planner produces its first
       // token.
       reasoning = STARTING_MSG;
-      yield { content: buildContent(reasoning, narrative, blocks, results, "running") };
+      yield { content: buildContent(reasoning, narrative, blocks, results, trace, "running") };
 
       if (!question) {
         yield {
@@ -128,7 +140,7 @@ export function createCustomer360Adapter(sessionId: string): ChatModelAdapter {
         // streaming we never retry, to avoid duplicating the answer.
         for (let attempt = 0; attempt < MAX_CONNECT_ATTEMPTS; attempt++) {
           try {
-            for await (const ev of fetchCopilotAnswerStream(question, history, sessionId, abortSignal)) {
+            for await (const ev of fetchCopilotAnswerStream(question, history, sessionId, abortSignal, debug)) {
               if (abortSignal.aborted) break;
               receivedAny = true;
               if (ev.type === "thinking") {
@@ -145,8 +157,14 @@ export function createCustomer360Adapter(sessionId: string): ChatModelAdapter {
                 reasoning = "";
               } else if (ev.type === "error") {
                 narrative = ev.message;
+              } else if (
+                ev.type === "meta" || ev.type === "stage" || ev.type === "llm" ||
+                ev.type === "plan" || ev.type === "tool" || ev.type === "result" ||
+                ev.type === "state"
+              ) {
+                trace.push(ev);
               }
-              yield { content: buildContent(reasoning, narrative, blocks, results, "running") };
+              yield { content: buildContent(reasoning, narrative, blocks, results, trace, "running") };
             }
             break; // stream completed cleanly
           } catch (err) {
@@ -172,7 +190,7 @@ export function createCustomer360Adapter(sessionId: string): ChatModelAdapter {
       }
 
       yield {
-        content: buildContent(reasoning, narrative, blocks, results, "complete"),
+        content: buildContent(reasoning, narrative, blocks, results, trace, "complete"),
         status: { type: "complete", reason: "unknown" },
       };
     },

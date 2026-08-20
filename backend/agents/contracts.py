@@ -13,6 +13,18 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+# Deterministic CRM tools the planner may route to (Signal -> State -> Action).
+# The LLM may call these but never compute the underlying business logic.
+CRM_TOOLS = {
+    "get_customer_signals",
+    "get_customer_state",
+    "get_customer_reasons",
+    "get_next_best_actions",
+    "get_customer_action_plan",
+    "top_at_risk_customers",
+}
+
+
 def parse_json_text(text: str) -> Any:
     """Strictly parse LLM JSON output, tolerating an optional markdown fence."""
     t = (text or "").strip()
@@ -83,6 +95,23 @@ def plan_steps(plan: Plan, max_queries: int) -> list[dict]:
             elif tool in ("query", "run_sql"):
                 push_query(inp.get("query") or inp.get("sql") or "",
                            inp.get("purpose") or "")
+            elif tool in CRM_TOOLS:
+                if tool == "top_at_risk_customers":
+                    steps.append({
+                        "kind": "crm",
+                        "tool": tool,
+                        "limit": int(inp.get("limit") or 10),
+                        "purpose": inp.get("purpose") or "",
+                    })
+                else:
+                    customer_id = inp.get("customer_id") or ""
+                    if customer_id:
+                        steps.append({
+                            "kind": "crm",
+                            "tool": tool,
+                            "customer_id": customer_id,
+                            "purpose": inp.get("purpose") or "",
+                        })
         return steps
 
     if plan.action == "reuse":

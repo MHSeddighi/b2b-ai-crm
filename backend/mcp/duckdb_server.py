@@ -23,6 +23,7 @@ import duckdb
 from mcp.server.fastmcp import FastMCP
 
 from backend.config import settings
+from backend.crm import tools as crm_tools
 
 # mcp 1.29 + pydantic-settings 2.15 emit a harmless forward-reference warning
 # for the FastMCP "lifespan" field. Suppress it so it doesn't pollute logs.
@@ -181,6 +182,71 @@ def get_schema(table: str = "") -> str:
         return json.dumps(out, ensure_ascii=False)
     finally:
         con.close()
+
+
+# ---------------------------------------------------------------------------
+# Deterministic Customer Intelligence tools.
+#
+# These expose backend-calculated signals/state/reasons/actions. The LLM must
+# consume (not compute) these values; it may only explain or personalize them.
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def get_customer_signals(customer_id: str) -> str:
+    """Return every backend-calculated signal for one customer.
+
+    Signals are computed deterministically in Python/SQL (real profit, purchase
+    trend, payment behaviour, share of wallet, purchase cycle, margin trend,
+    growth potential, churn risk, complaint impact, offer affinity). The LLM
+    must NOT invent or recalculate these values.
+
+    Args:
+        customer_id: the customer's canonical Customer_ID.
+    """
+    return crm_tools.get_customer_signals(customer_id)
+
+
+@mcp.tool()
+def get_customer_state(customer_id: str) -> str:
+    """Return the derived customer state dimensions (value, churn risk, growth
+    opportunity, relationship health, profitability, payment risk)."""
+    return crm_tools.get_customer_state(customer_id)
+
+
+@mcp.tool()
+def get_customer_reasons(customer_id: str) -> str:
+    """Return structured evidence/reasons explaining the important states."""
+    return crm_tools.get_customer_reasons(customer_id)
+
+
+@mcp.tool()
+def get_next_best_actions(customer_id: str) -> str:
+    """Return backend-approved, eligible + ranked next-best actions only.
+
+    The LLM must never propose an action that is not present in this output.
+    """
+    return crm_tools.get_next_best_actions(customer_id)
+
+
+@mcp.tool()
+def get_customer_action_plan(customer_id: str) -> str:
+    """Return the complete deterministic recommendation context for a customer
+    (state + reasons + actions + data quality) for the LLM to explain."""
+    return crm_tools.get_customer_action_plan(customer_id)
+
+
+@mcp.tool()
+def top_at_risk_customers(limit: int = 10) -> str:
+    """Rank customers by churn-risk and return the top ``limit``.
+
+    Computed deterministically from the customer-intelligence signals (complaint
+    volume, purchase recency, order volume, bounced checks). Use this for
+    "which customers are at risk / likely to churn" questions. The LLM must not
+    recompute these scores.
+
+    Args:
+        limit: how many customers to return (default 10, max 50).
+    """
+    return crm_tools.top_at_risk_customers(limit)
 
 
 def _tables(con: duckdb.DuckDBPyConnection) -> list[tuple[str, str]]:

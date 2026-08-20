@@ -92,7 +92,7 @@ async def test_compose_failure_is_explicit():
 async def test_assumption_flows_into_compose():
     captured = {}
 
-    async def fake_compose(question, ctx, results, assumption):
+    async def fake_compose(question, ctx, results, assumption, crm_results=None, trace=None):
         captured["assumption"] = assumption
         return [{"id": "b1", "type": "markdown", "content": "ok"}]
 

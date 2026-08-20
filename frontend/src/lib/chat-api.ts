@@ -76,7 +76,49 @@ export type StreamEvent =
       query?: string;
     }
   | { type: "error"; message: string }
-  | { type: "done" };
+  | { type: "done" }
+  // --- observability events (stages, LLM calls, plan, tools, results, state) ---
+  | { type: "meta"; session_id?: string; question?: string }
+  | { type: "stage"; stage: string; label?: string; detail?: string }
+  | {
+      type: "llm";
+      call: string;
+      model: string;
+      input_chars: number;
+      output_chars: number;
+      latency_ms: number;
+      raw?: string;
+    }
+  | { type: "plan"; intent: string; steps: unknown[]; assumption: string }
+  | {
+      type: "tool";
+      tool: string;
+      input: unknown;
+      latency_ms: number;
+      ok: boolean;
+      result?: unknown;
+      error?: string;
+    }
+  | {
+      type: "result";
+      resultId: string;
+      purpose: string;
+      columns: string[];
+      n_rows: number;
+    }
+  | { type: "state"; state: Record<string, unknown> };
+
+/** A subset of StreamEvent used by the UI debug panel. */
+export type TraceEvent = Extract<
+  StreamEvent,
+  | { type: "meta" }
+  | { type: "stage" }
+  | { type: "llm" }
+  | { type: "plan" }
+  | { type: "tool" }
+  | { type: "result" }
+  | { type: "state" }
+>;
 
 /** Hard cap on a single request so the loading state can never hang forever. */
 const STREAM_TIMEOUT_MS = 240_000;
@@ -90,7 +132,8 @@ export async function* fetchCopilotAnswerStream(
   question: string,
   history: ChatHistoryItem[] = [],
   sessionId?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  debug = false
 ): AsyncGenerator<StreamEvent> {
   const controller = new AbortController();
   const onOuterAbort = () => controller.abort();
@@ -101,7 +144,7 @@ export async function* fetchCopilotAnswerStream(
     const res = await fetch(`${API_URL}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, history, session_id: sessionId }),
+      body: JSON.stringify({ question, history, session_id: sessionId, debug }),
       signal: controller.signal,
     });
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
@@ -13,6 +14,8 @@ from openai import AsyncOpenAI, OpenAI
 from backend.agents import contracts
 from backend.agents.analysis import is_huge, too_huge_message
 from backend.agents.context import SessionState, answer_preview
+from backend.agents.contracts import CRM_TOOLS
+from backend.agents.trace import Trace
 from backend.config import settings
 from backend.mcp.schema_context import CUSTOMER360_SCHEMA
 from backend.schemas.blocks import BLOCK_TYPES, SqlResult, validate_blocks
@@ -67,6 +70,34 @@ Available tools:
   input: {{"query": "<SQL>", "purpose": "<short reason>"}}
 - reuse: use an existing result from an earlier turn in this conversation.
   input: {{"resultId": "<existing result id>", "purpose": "<short reason>"}}
+- get_customer_signals: all backend-calculated signals for one customer.
+  input: {{"customer_id": "<Customer_ID>"}}
+- get_customer_state: derived customer state (value/risk/health/opportunity).
+  input: {{"customer_id": "<Customer_ID>"}}
+- get_customer_reasons: structured evidence/reasons for a customer.
+  input: {{"customer_id": "<Customer_ID>"}}
+- get_next_best_actions: backend-approved, eligible + ranked actions.
+  input: {{"customer_id": "<Customer_ID>"}}
+- get_customer_action_plan: full recommendation context for a customer.
+  input: {{"customer_id": "<Customer_ID>"}}
+- top_at_risk_customers: rank customers by churn-risk and return the top N.
+  Use for "which customers are at risk / likely to churn" questions.
+  input: {{"limit": 10}}
+
+CRITICAL ROUTING RULES:
+- For customer-specific recommendations, churn/risk, growth opportunity,
+  "what should we do with customer X", next best actions, or any signal
+  (profit, trend, payment, share of wallet, cycle, margin, complaints,
+  offers), use the CRM tools above. NEVER write SQL or invent these numbers.
+- For "which customers are at risk / likely to churn / should be watched" across
+  ALL customers, use top_at_risk_customers with a small limit (e.g. 10), NOT
+  SQL. Do not try to compute the risk yourself.
+- Use the query tool only for factual lookups / aggregations that the CRM
+  tools do not cover.
+- The CRM tools return backend-computed values; you must not invent or
+  recalculate any signal, score, threshold, or action.
+- If a CRM tool returns no data (e.g. customer not found, unknown signal),
+  say the data is insufficient — never guess.
 
 Database schema:
 {CUSTOMER360_SCHEMA}
@@ -98,6 +129,9 @@ Rules:
 - Keep the plan simple and focused.
 - Never guess data; if the question is ambiguous, pick a sensible assumption and put it in "assumption".
 - Keep the result small: filter, join, aggregate, sort and LIMIT inside the SQL.
+- For "which / top N / who is at risk" ranking questions, ALWAYS ORDER BY the
+  risk or relevant metric DESC and LIMIT a small number (e.g. LIMIT 10 or 20)
+  inside the SQL so the result stays small. Never select the whole table.
 - For orders use COUNT(DISTINCT order_id); orders ≠ lines ≠ units.
 - SQL must be read-only and start with SELECT or WITH.
 - If the question needs more than one query or may return a large result, that
@@ -115,7 +149,12 @@ The user does not know the database, columns, SQL, or technical terminology.
 Allowed block types:
 {BLOCK_TYPES_TEXT}
 
-Return ONLY the required JSON blocks.
+Block JSON shapes (field names are EXACT — do not rename them):
+- markdown: {{"type":"markdown","content":"..."}}
+- metric:   {{"type":"metric","label":"...","valueKey":"<col>","resultId":"<id>","rowIndex":0}}
+- chart:    {{"type":"chart","resultId":"<id>","chartType":"line","xKey":"<col>","series":[{{"dataKey":"<col>","label":"..."}}],"title":"..."}}
+- table:    {{"type":"table","columns":["a","b"],"rows":[["x","y"]]}}  (or reference a result with "resultId")
+- recommendation: {{"type":"recommendation","title":"...","text":"...","reason":"..."}}
 
 Rules:
 - Answer directly first.
@@ -132,6 +171,8 @@ Rules:
 - When the results are numeric or a trend, always add a chart, metric, or table
   to visualize them — do not leave numbers as plain text alone.
 - If there is an assumption, reflect it naturally and briefly in the answer.
+- Use the "markdown" type for prose (never "text"; the content field is
+  "content"). Use "columns" (never "headers") in tables.
 """
 
 
@@ -176,6 +217,23 @@ Rules:
   briefly tell the user at a friendly level what is happening (e.g. "داده‌ها
   بزرگ است و پاسخ در چند مرحله آماده شد…") and then continue. Keep such notes
   short and natural.
+- When discussing churn, at-risk customers, retention, or recommendations,
+  briefly say the assessment is based on the CRM's customer-intelligence
+  signals (complaint volume, purchase recency, order volume, bounced checks)
+  and the risk-scoring algorithm, then explain which signals drive the risk for
+  the specific customers. Do this naturally in the user's language.
+
+RECOMMENDATION SAFETY RULES (mandatory):
+- Never invent CRM metrics, customer signals, business conditions,
+  recommendations, thresholds, or actions.
+- For customer-specific recommendations, use ONLY the values returned by the
+  CRM signal/action tools (get_customer_signals / get_customer_state /
+  get_customer_reasons / get_next_best_actions / get_customer_action_plan).
+- You may explain, summarize, prioritize, and personalize backend-approved
+  recommendations, but you must NOT create a recommendation that is not
+  present in the tool output.
+- If the required tool data is unavailable or insufficient, say so explicitly
+  and do not guess.
 """
 
 
@@ -277,6 +335,8 @@ async def _llm_call_async(
     system: str,
     user: str,
     temperature: float = 0.0,
+    trace: Trace | None = None,
+    call: str = "llm",
 ) -> str:
     """Run the blocking LLM call off the event loop.
 
@@ -286,7 +346,15 @@ async def _llm_call_async(
     and /api/health) stalls. Running it via ``asyncio.to_thread`` keeps the
     loop responsive while the LLM thinks.
     """
-    return await asyncio.to_thread(_llm_call, system, user, temperature)
+    t0 = time.monotonic()
+    raw = await asyncio.to_thread(_llm_call, system, user, temperature)
+    if trace is not None:
+        trace.llm(
+            call=call, model=settings.resolved_model,
+            input_chars=len(system) + len(user), output_chars=len(raw or ""),
+            latency_ms=int((time.monotonic() - t0) * 1000), raw=raw,
+        )
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +478,26 @@ async def _call_query(session: ClientSession, sql: str) -> dict[str, Any]:
     return json.loads(text)
 
 
+async def _call_crm_tool(session: ClientSession, tool: str,
+                         args: dict[str, Any],
+                         trace: Trace | None = None) -> dict[str, Any]:
+    """Invoke a deterministic CRM tool and parse its JSON result."""
+    t0 = time.monotonic()
+    response = await session.call_tool(tool, args)
+    text = "".join(
+        getattr(item, "text", "") or ""
+        for item in response.content
+    )
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Preserve non-JSON output as a raw string result for safe display.
+        data = {"_raw": text}
+    if trace is not None:
+        trace.tool(tool, args, data, int((time.monotonic() - t0) * 1000), ok=True)
+    return data
+
+
 async def _run_sql(sql: str) -> dict[str, Any]:
     """Execute ``sql`` against the shared MCP session.
 
@@ -467,18 +555,30 @@ async def _fix_sql(question: str, sql: str, error: str) -> str | None:
     return fixed
 
 
-async def _exec_query(question: str, sql: str) -> dict[str, Any]:
+async def _exec_query(question: str, sql: str,
+                      trace: Trace | None = None) -> dict[str, Any]:
     """Run a query; if it returns an SQL error, ask the LLM to fix it once and
     retry. Returns the original error if the fix doesn't help or the query is
     genuinely bad, so failures stay explicit instead of silent."""
+    t0 = time.monotonic()
     data = await _run_sql(sql)
     if not data.get("error"):
+        if trace is not None:
+            trace.tool("query", {"sql": sql}, data,
+                       int((time.monotonic() - t0) * 1000), ok=True)
         return data
     fixed = await _fix_sql(question, sql, data["error"])
     if fixed and fixed.strip().lower() != sql.strip().lower():
         data2 = await _run_sql(fixed)
         if not data2.get("error"):
+            if trace is not None:
+                trace.tool("query", {"sql": sql, "fixed_sql": fixed}, data2,
+                           int((time.monotonic() - t0) * 1000), ok=True)
             return data2
+    if trace is not None:
+        trace.tool("query", {"sql": sql}, data,
+                   int((time.monotonic() - t0) * 1000), ok=False,
+                   error=data.get("error", ""))
     return data
 
 
@@ -520,18 +620,25 @@ def _plan_from_raw(raw: str) -> dict[str, Any]:
 async def _plan(
     question: str,
     ctx: SessionState,
+    trace: Trace | None = None,
 ) -> dict[str, Any]:
     raw = await _llm_call_async(
         PLANNER_SYSTEM,
         _plan_prompt(question, ctx),
         temperature=0.0,
+        trace=trace,
+        call="planner",
     )
-    return _plan_from_raw(raw)
+    plan = _plan_from_raw(raw)
+    if trace is not None:
+        trace.plan(plan["intent"], plan["steps"], plan["assumption"])
+    return plan
 
 
 async def _plan_stream(
     question: str,
     ctx: SessionState,
+    trace: Trace | None = None,
 ) -> Any:
     """Stream the planner's reasoning as raw deltas, then yield the parsed plan.
 
@@ -539,14 +646,37 @@ async def _plan_stream(
     token of the planner's JSON, then a final ``("plan", dict)`` tuple.
     """
     raw = ""
+    t0 = time.monotonic()
+    prompt = _plan_prompt(question, ctx)
     async for delta in _llm_stream(
         PLANNER_SYSTEM,
-        _plan_prompt(question, ctx),
+        prompt,
         temperature=0.0,
     ):
         raw += delta
         yield ("thinking", delta)
-    yield ("plan", _plan_from_raw(raw))
+    if trace is not None:
+        trace.llm(
+            call="planner_stream", model=settings.resolved_model,
+            input_chars=len(PLANNER_SYSTEM) + len(prompt),
+            output_chars=len(raw), latency_ms=int((time.monotonic() - t0) * 1000),
+            raw=raw,
+        )
+    plan = _plan_from_raw(raw)
+    if trace is not None:
+        trace.plan(plan["intent"], plan["steps"], plan["assumption"])
+    yield ("plan", plan)
+
+
+def _render_crm(crm_results: dict[str, Any]) -> str:
+    """Render deterministic CRM tool results as a compact JSON block."""
+    if not crm_results:
+        return ""
+    parts: list[str] = []
+    for key, data in crm_results.items():
+        js = json.dumps(data, ensure_ascii=False, default=str)
+        parts.append(f"CRM result [{key}]:\n{js[:2500]}")
+    return "\n\n".join(parts)
 
 
 def _compose_prompt(
@@ -554,6 +684,7 @@ def _compose_prompt(
     ctx: SessionState,
     results: dict[str, SqlResult],
     assumption: str,
+    crm_results: dict[str, Any] | None = None,
 ) -> str:
     context = ctx.render_context(
         question,
@@ -563,6 +694,8 @@ def _compose_prompt(
     samples = ctx.result_samples(
         list(results.keys())
     )
+
+    crm_block = _render_crm(crm_results or {})
 
     return f"""
 User question:
@@ -577,6 +710,10 @@ Assumption:
 Results:
 {samples}
 
+Deterministic customer intelligence (backend-computed, do NOT recalculate or
+invent; use these values verbatim for any recommendation):
+{crm_block or "(none)"}
+
 Answer the user's question using these results. The user does not know the
 database, columns, SQL, or technical terminology.
 
@@ -589,6 +726,8 @@ async def _compose(
     ctx: SessionState,
     results: dict[str, SqlResult],
     assumption: str,
+    crm_results: dict[str, Any] | None = None,
+    trace: Trace | None = None,
 ) -> list[dict]:
     raw = await _llm_call_async(
         COMPOSER_SYSTEM,
@@ -597,8 +736,11 @@ async def _compose(
             ctx,
             results,
             assumption,
+            crm_results,
         ),
         temperature=0.2,
+        trace=trace,
+        call="composer",
     )
 
     parsed = contracts.parse_blocks_json(raw)
@@ -661,10 +803,14 @@ async def _chat_answer(
 async def _database_answer(
     question: str,
     ctx: SessionState,
+    trace: Trace | None = None,
 ) -> dict[str, Any]:
+    if trace is not None:
+        trace.meta(session_id=ctx.session_id, question=question)
+        trace.stage("planning", "شروع تحلیل سؤال")
 
     try:
-        plan = await _plan(question, ctx)
+        plan = await _plan(question, ctx, trace)
     except Exception as exc:
         return _error(f"خطا در تحلیل سؤال: {exc}")
 
@@ -675,6 +821,7 @@ async def _database_answer(
         return await _chat_answer(question, ctx)
 
     results: dict[str, SqlResult] = {}
+    crm_results: dict[str, Any] = {}
 
     for step in steps:
         kind = step["kind"]
@@ -699,8 +846,10 @@ async def _database_answer(
             if not normalized.startswith(("select", "with")):
                 return _error("کوئری تولیدشده مجاز نیست.")
 
+            if trace is not None:
+                trace.stage("query", "در حال اجرای پرس‌وجو", sql[:200])
             try:
-                data = await _exec_query(question, sql)
+                data = await _exec_query(question, sql, trace)
             except Exception as exc:
                 return _error(f"خطا در دریافت اطلاعات: {exc}")
 
@@ -716,6 +865,29 @@ async def _database_answer(
                 data.get("rows", []),
                 data.get("n_rows"),
             )
+            if trace is not None:
+                trace.result(result_id, step.get("purpose") or "",
+                             data.get("columns", []), data.get("n_rows", 0))
+
+        elif kind == "crm":
+            tool = step.get("tool") or ""
+            customer_id = step.get("customer_id") or ""
+            if tool not in CRM_TOOLS:
+                return _error("درخواست سیگنال/اقدام مشتری نامعتبر است.")
+            if tool == "top_at_risk_customers":
+                args: dict[str, Any] = {"limit": int(step.get("limit") or 10)}
+            elif not customer_id:
+                return _error("درخواست سیگنال/اقدام مشتری نامعتبر است.")
+            else:
+                args = {"customer_id": customer_id}
+            if trace is not None:
+                trace.stage("crm_tool", f"در حال دریافت نتایج {tool}", customer_id or str(args))
+            try:
+                data = await _call_crm_tool(await _ensure_mcp(), tool, args, trace)
+            except Exception as exc:  # noqa: BLE001
+                return _error(f"خطا در دریافت اطلاعات مشتری: {exc}")
+            key = f"{tool}:{customer_id or args.get('limit')}"
+            crm_results[key] = data
 
         else:
             return _error("نوع درخواست قابل تشخیص نیست.")
@@ -749,12 +921,16 @@ async def _database_answer(
             "results": results,
         }
 
+    if trace is not None:
+        trace.stage("composing", "در حال آماده‌سازی پاسخ")
     try:
         blocks = await _compose(
             question,
             ctx,
             results,
             plan["assumption"],
+            crm_results,
+            trace,
         )
 
         blocks = validate_blocks(blocks)
@@ -784,9 +960,14 @@ async def _database_answer(
         answer_preview(blocks),
     )
 
+    if trace is not None:
+        trace.stage("done", "پاسخ آماده شد")
+        trace.state(dict(ctx.state))
+
     return {
         "blocks": blocks,
         "results": results,
+        "trace": trace.dump() if trace is not None else [],
     }
 
 
@@ -854,9 +1035,11 @@ def _narrative_prompt(
     ctx: SessionState,
     results: dict[str, SqlResult],
     assumption: str,
+    crm_results: dict[str, Any] | None = None,
 ) -> str:
     context = ctx.render_context(question, active_ids=[])
     samples = ctx.result_samples(list(results.keys()))
+    crm_block = _render_crm(crm_results or {})
     return f"""
 User question:
 {question}
@@ -869,6 +1052,10 @@ Assumption:
 
 Results:
 {samples}
+
+Deterministic customer intelligence (backend-computed; do NOT recalculate or
+invent — use these values verbatim for any recommendation):
+{crm_block or "(none)"}
 
 Answer the user's question using these results, as plain natural-language text.
 Do NOT return JSON.
@@ -880,9 +1067,11 @@ def _blocks_prompt(
     ctx: SessionState,
     results: dict[str, SqlResult],
     assumption: str,
+    crm_results: dict[str, Any] | None = None,
 ) -> str:
     context = ctx.render_context(question, active_ids=[])
     samples = ctx.result_samples(list(results.keys()))
+    crm_block = _render_crm(crm_results or {})
     return f"""
 User question:
 {question}
@@ -896,6 +1085,9 @@ Assumption:
 Results:
 {samples}
 
+Deterministic customer intelligence (backend-computed):
+{crm_block or "(none)"}
+
 Return ONLY a JSON array of blocks (non-markdown). Use only the available
 resultIds. Return an empty array if no block genuinely improves the answer.
 """
@@ -906,18 +1098,29 @@ async def _compose_text_stream(
     ctx: SessionState,
     results: dict[str, SqlResult] | None = None,
     assumption: str = "",
+    crm_results: dict[str, Any] | None = None,
+    trace: Trace | None = None,
 ) -> Any:
     """Stream the natural-language narrative answer as text deltas."""
-    if results:
+    if results or crm_results:
         system = NARRATIVE_SYSTEM
-        user = _narrative_prompt(question, ctx, results, assumption)
+        user = _narrative_prompt(question, ctx, results or {}, assumption, crm_results)
         temperature = 0.2
     else:
         system = CHAT_SYSTEM
         user = ctx.render_context(question)
         temperature = 0.4
+    t0 = time.monotonic()
+    out = ""
     async for delta in _llm_stream(system, user, temperature):
+        out += delta
         yield delta
+    if trace is not None:
+        trace.llm(
+            call="narrative", model=settings.resolved_model,
+            input_chars=len(system) + len(user), output_chars=len(out),
+            latency_ms=int((time.monotonic() - t0) * 1000),
+        )
 
 
 async def _compose_blocks(
@@ -925,14 +1128,18 @@ async def _compose_blocks(
     ctx: SessionState,
     results: dict[str, SqlResult],
     assumption: str,
+    crm_results: dict[str, Any] | None = None,
+    trace: Trace | None = None,
 ) -> list[dict]:
     """Produce optional structured blocks (charts/tables/metrics) at the end."""
     if not results:
         return []
     raw = await _llm_call_async(
         _blocks_system(", ".join(results.keys())),
-        _blocks_prompt(question, ctx, results, assumption),
+        _blocks_prompt(question, ctx, results, assumption, crm_results),
         temperature=0.0,
+        trace=trace,
+        call="blocks",
     )
     parsed = contracts.parse_blocks_json(raw)
     if isinstance(parsed, list):
@@ -943,13 +1150,19 @@ async def _compose_blocks(
 async def _database_answer_stream(
     question: str,
     ctx: SessionState,
+    trace: Trace | None = None,
 ) -> Any:
     """Yield SSE-style event dicts for the full database-backed answer."""
+    if trace is not None:
+        trace.meta(session_id=ctx.session_id, question=question)
+        trace.stage("planning", "شروع تحلیل سؤال")
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
     yield {"type": "status", "status": "planning"}
 
     plan = None
     try:
-        async for item in _plan_stream(question, ctx):
+        async for item in _plan_stream(question, ctx, trace):
             kind, payload = item
             if kind == "thinking":
                 yield {"type": "thinking", "text": payload}
@@ -959,6 +1172,10 @@ async def _database_answer_stream(
         reason = str(exc).strip() or "نتیجه برنامه‌ریزی نامعتبر بود"
         yield {"type": "error", "message": f"خطا در تحلیل سؤال: {reason}"}
         return
+
+    if trace is not None:
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
 
     if plan is None:
         yield {"type": "error", "message": "خطا در تحلیل سؤال: طرح تولید نشد."}
@@ -970,16 +1187,20 @@ async def _database_answer_stream(
     if not steps:
         yield {"type": "status", "status": "composing"}
         try:
-            async for delta in _compose_text_stream(question, ctx):
+            async for delta in _compose_text_stream(question, ctx, trace=trace):
                 yield {"type": "text", "text": delta}
         except Exception as exc:  # noqa: BLE001
             reason = str(exc).strip() or "پاسخ نامعتبر بود"
             yield {"type": "error", "message": f"خطا در آماده‌سازی پاسخ: {reason}"}
             return
+        if trace is not None:
+            for ev in trace.drain():
+                yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
         yield {"type": "blocks", "blocks": [], "results": {}}
         return
 
     results: dict[str, SqlResult] = {}
+    crm_results: dict[str, Any] = {}
     last_sql: str | None = None
 
     yield {"type": "status", "status": "querying"}
@@ -1019,10 +1240,14 @@ async def _database_answer_stream(
                 yield {"type": "error", "message": "کوئری تولیدشده مجاز نیست."}
                 return
 
+            if trace is not None:
+                trace.stage("query", "در حال اجرای پرس‌وجو", sql[:200])
+                for ev in trace.drain():
+                    yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
             yield {"type": "thinking", "text": f"در حال اجرای پرس‌وجو: {sql}"}
 
             try:
-                data = await _exec_query(question, sql)
+                data = await _exec_query(question, sql, trace)
             except Exception as exc:  # noqa: BLE001
                 yield {"type": "error", "message": f"خطا در دریافت اطلاعات: {exc}"}
                 return
@@ -1040,6 +1265,39 @@ async def _database_answer_stream(
                 data.get("n_rows"),
             )
             last_sql = sql
+            if trace is not None:
+                trace.result(result_id, step.get("purpose") or "",
+                             data.get("columns", []), data.get("n_rows", 0))
+                for ev in trace.drain():
+                    yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
+
+        elif kind == "crm":
+            tool = step.get("tool") or ""
+            customer_id = step.get("customer_id") or ""
+            if tool not in CRM_TOOLS:
+                yield {"type": "error", "message": "درخواست سیگنال/اقدام مشتری نامعتبر است."}
+                return
+            if tool == "top_at_risk_customers":
+                crm_args: dict[str, Any] = {"limit": int(step.get("limit") or 10)}
+            elif not customer_id:
+                yield {"type": "error", "message": "درخواست سیگنال/اقدام مشتری نامعتبر است."}
+                return
+            else:
+                crm_args = {"customer_id": customer_id}
+            if trace is not None:
+                trace.stage("crm_tool", f"در حال دریافت نتایج {tool}",
+                            customer_id or str(crm_args))
+                for ev in trace.drain():
+                    yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
+            try:
+                data = await _call_crm_tool(await _ensure_mcp(), tool, crm_args, trace)
+            except Exception as exc:  # noqa: BLE001
+                yield {"type": "error", "message": f"خطا در دریافت اطلاعات مشتری: {exc}"}
+                return
+            crm_results[f"{tool}:{customer_id or crm_args.get('limit')}"] = data
+            if trace is not None:
+                for ev in trace.drain():
+                    yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
 
         else:
             yield {"type": "error", "message": "نوع درخواست قابل تشخیص نیست."}
@@ -1066,22 +1324,32 @@ async def _database_answer_stream(
         return
 
     # Stream the narrative answer text.
+    if trace is not None:
+        trace.stage("composing", "در حال آماده‌سازی پاسخ")
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
     yield {"type": "status", "status": "composing"}
     narrative = ""
     try:
-        async for delta in _compose_text_stream(question, ctx, results, plan["assumption"]):
+        async for delta in _compose_text_stream(question, ctx, results, plan["assumption"], crm_results, trace):
             narrative += delta
             yield {"type": "text", "text": delta}
     except Exception as exc:  # noqa: BLE001
         yield {"type": "error", "message": f"خطا در آماده‌سازی پاسخ: {exc}"}
         return
+    if trace is not None:
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
 
     # Structured blocks (charts/tables/metrics) appended after the text.
     yield {"type": "thinking", "text": "در حال آماده‌سازی نمودار و جدول…"}
     try:
-        blocks = await _compose_blocks(question, ctx, results, plan["assumption"])
+        blocks = await _compose_blocks(question, ctx, results, plan["assumption"], crm_results, trace)
     except Exception:  # noqa: BLE001 - blocks are optional
         blocks = []
+    if trace is not None:
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
 
     blocks = validate_blocks(blocks)
 
@@ -1099,6 +1367,12 @@ async def _database_answer_stream(
         ),
     )
 
+    if trace is not None:
+        trace.stage("done", "پاسخ آماده شد")
+        trace.state(dict(ctx.state))
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
+
     yield {
         "type": "blocks",
         "blocks": [b.model_dump() if hasattr(b, "model_dump") else b for b in blocks],
@@ -1111,16 +1385,23 @@ async def answer_stream(
     question: str,
     history: list[dict] | None = None,
     session_id: str | None = None,
+    debug: bool = False,
 ) -> Any:
-    """Async generator yielding event dicts for the streaming chat endpoint."""
+    """Async generator yielding event dicts for the streaming chat endpoint.
+
+    With ``debug=True`` the events include raw LLM outputs (planner/composer
+    JSON); otherwise only sizes/latency are reported. Stage/plan/tool/result/
+    state events are always emitted so the UI can show how the answer is built.
+    """
     if not settings.has_key:
         yield {"type": "error", "message": "دستیار هنوز برای پاسخ‌گویی به این سؤال پیکربندی نشده است."}
         return
 
     ctx = _get_session(session_id or "_")
+    trace = Trace(debug=debug)
 
     try:
-        async for event in _database_answer_stream(question, ctx):
+        async for event in _database_answer_stream(question, ctx, trace):
             yield event
         yield {"type": "done"}
     except Exception as exc:  # noqa: BLE001
@@ -1136,6 +1417,7 @@ async def answer(
     history: list[dict] | None = None,
     session_id: str | None = None,
     session_state: SessionState | None = None,
+    debug: bool = False,
 ) -> dict[str, Any]:
 
     if not settings.has_key:
@@ -1148,10 +1430,13 @@ async def answer(
             session_id or "_"
         )
 
+    trace = Trace(debug=debug)
+
     try:
         return await _database_answer(
             question,
             ctx,
+            trace,
         )
 
     except Exception as exc:

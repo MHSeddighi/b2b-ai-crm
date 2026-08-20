@@ -130,6 +130,16 @@ class ChatResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _normalize(item: dict[str, Any]) -> dict[str, Any]:
+    """Tolerate common LLM field-name drift (text->content, headers->columns)."""
+    item = dict(item)
+    if item.get("type") == "markdown" and "content" not in item and "text" in item:
+        item["content"] = item.pop("text")
+    if item.get("type") == "table" and "columns" not in item and "headers" in item:
+        item["columns"] = item.pop("headers")
+    return item
+
+
 def validate_blocks(raw: Any) -> list[Block]:
     """Validate raw LLM-produced blocks, dropping malformed/unknown ones.
 
@@ -145,8 +155,8 @@ def validate_blocks(raw: Any) -> list[Block]:
         btype = item.get("type")
         if btype not in BLOCK_TYPES:
             continue
-        # guaranteed id
-        item = dict(item)
+        # guaranteed id + tolerant field aliases
+        item = _normalize(item)
         item.setdefault("id", f"b{i}")
         try:
             block = _construct(btype, item)

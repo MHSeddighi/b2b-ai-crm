@@ -50,6 +50,9 @@ class ChatRequest(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
     # Optional session id: enables bounded per-session state + result reuse.
     session_id: str | None = None
+    # When true, responses include the full agent trace (LLM calls, plans,
+    # tool calls and results, session state) for debugging.
+    debug: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -59,6 +62,7 @@ class ChatResponse(BaseModel):
     columns: list[str] = []
     rows: list[list[Any]] = []
     n_rows: int = 0
+    trace: list[Any] = []
 
 
 @app.get("/api/health")
@@ -88,10 +92,50 @@ async def customer_360(customer_id: str) -> dict[str, Any] | None:
     return api_data.customer_360(customer_id)
 
 
+# --- Deterministic Customer Intelligence (Signal -> State -> Action) ---
+@app.get("/api/customers/{customer_id}/intelligence")
+async def customer_intelligence(customer_id: str) -> dict[str, Any]:
+    """Canonical customer-intelligence object (signals + state + reasons +
+    next-best actions + data quality), computed entirely in the backend."""
+    from backend.crm.service import service
+    return service.get_intelligence(customer_id).model_dump()
+
+
+@app.get("/api/customers/{customer_id}/signals")
+async def customer_signals(customer_id: str) -> dict[str, Any]:
+    from backend.crm.service import service
+    return {k: v.model_dump() for k, v in service.get_signals(customer_id).items()}
+
+
+@app.get("/api/customers/{customer_id}/state")
+async def customer_state(customer_id: str) -> dict[str, Any] | None:
+    from backend.crm.service import service
+    st = service.get_state(customer_id)
+    return st.model_dump() if st else None
+
+
+@app.get("/api/customers/{customer_id}/reasons")
+async def customer_reasons(customer_id: str) -> list[dict[str, Any]]:
+    from backend.crm.service import service
+    return [r.model_dump() for r in service.get_reasons(customer_id)]
+
+
+@app.get("/api/customers/{customer_id}/next-best-actions")
+async def customer_next_best_actions(customer_id: str) -> list[dict[str, Any]]:
+    from backend.crm.service import service
+    return [a.model_dump() for a in service.get_next_best_actions(customer_id)]
+
+
+@app.get("/api/customers/{customer_id}/action-plan")
+async def customer_action_plan(customer_id: str) -> dict[str, Any]:
+    from backend.crm.service import service
+    return service.get_action_plan(customer_id)
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> ChatResponse:
     result = await db_agent.answer(req.question, history=req.history,
-                                   session_id=req.session_id)
+                                   session_id=req.session_id, debug=req.debug)
     blocks = [b.model_dump() for b in result.get("blocks", [])]
     results = {
         k: v.model_dump() if hasattr(v, "model_dump") else v
@@ -104,6 +148,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         columns=result.get("columns", []),
         rows=result.get("rows", []),
         n_rows=result.get("n_rows", 0),
+        trace=result.get("trace", []),
     )
 
 
@@ -127,6 +172,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     req.question,
                     history=req.history,
                     session_id=req.session_id,
+                    debug=req.debug,
                 ):
                     await q.put(("event", event))
             except Exception as exc:  # noqa: BLE001 - never leave the stream hanging
