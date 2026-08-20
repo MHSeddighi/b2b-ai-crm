@@ -14,6 +14,7 @@ from openai import AsyncOpenAI, OpenAI
 from backend.agents import contracts
 from backend.agents.analysis import rank_discriminators
 from backend.agents.context import SessionState, answer_preview
+from backend.agents.recommend import customer_signals, product_signals
 from backend.config import settings
 from backend.mcp.schema_context import CUSTOMER360_SCHEMA
 from backend.schemas.blocks import BLOCK_TYPES, SqlResult, validate_blocks
@@ -406,6 +407,44 @@ Rules:
   number that isn't supported by the data. NEVER fabricate a specific
   discount percentage, price, or product name that does not appear in the
   results.
+- When a "Measured recommendation signals" block is present, BUILD THE
+  RECOMMENDATION ON IT — those numbers are computed from the full data and
+  are the difference between a real proposal and generic advice. Work through
+  whichever of these are present and actually matter for the question (not as
+  a checklist — weave them into 3-6 natural sentences/bullets):
+  * HEADROOM: name the untapped gap and the competitor holding it — that is
+    the size of the opportunity ("we hold 41% of their spend; ~2,000 units
+    sit with a local supplier").
+  * CADENCE: say WHEN to approach and whether they are overdue. A customer
+    far past their normal buying gap is a re-activation case, not a routine
+    upsell — say so.
+  * BUYS MOST: recommend a realistic QUANTITY anchored on their typical
+    order size, and lead with products they already buy.
+  * OPEN COMPLAINTS / DEVELOPMENT REQUESTS: if anything is unresolved, say
+    it must be cleared or answered BEFORE pushing a new offer — an open
+    complaint makes an upsell land badly.
+  * HOW THEY PAY + COLLECTION: recommend cash/prepaid vs credit based on
+    their real behaviour. Late settlement or any bounced cheque means
+    propose cash/prepaid or shorter terms; a clean, fast-settling customer
+    can be offered credit or longer terms.
+  For a PRODUCT the same applies to its own signals:
+  * DEMAND BY YEAR: say whether it is growing or declining, with the %.
+    A sharp drop is a defend/re-launch case, not a routine upsell.
+  * MARGIN: a thin margin means DON'T recommend deeper discounting — say so
+    and push volume/value instead.
+  * OFFER HISTORY: recommend the discount level that historically CLOSES,
+    and give the accept rate — this is far better than "offer a discount".
+  * CROSS-SELL WHITESPACE: name the number of same-family customers who
+    never bought it — that is the concrete prospect list to work.
+  * TOP BUYERS / concentration: flag dependence on one buyer as a risk.
+  * COMPLAINTS / OPEN REQUESTS: unresolved items to clear first.
+- If a "These exact values MUST appear" line is present, every one of those
+  values HAS to show up in your recommendation. They are the difference
+  between a proposal the manager can act on and generic advice — dropping
+  the competitor's name, the volume, the margin or the closing discount
+  makes the recommendation worthless. Do not omit any of them.
+- Say the numbers plainly in the user's language; do not name the signal
+  labels (HEADROOM/CADENCE/MARGIN/...) or mention that they were "computed".
 """
 
 
@@ -1097,6 +1136,62 @@ async def _plan_stream(
     yield ("plan", plan)
 
 
+# Customer ids are "C_" + digits and product ids start "P_" (see the schema
+# rules), so the prefix alone tells us which signal set to compute.
+_CUSTOMER_ID_RE = re.compile(r"\bC[_-]\d{3,}\b", re.IGNORECASE)
+_PRODUCT_ID_RE = re.compile(r"\bP_[A-Za-z0-9_]{3,30}\b")
+
+
+def _find_entity_id(
+    pattern: re.Pattern[str],
+    question: str,
+    results: dict[str, SqlResult],
+    id_columns: tuple[str, ...],
+) -> str | None:
+    """Locate an entity id in the question, else in the fetched results.
+
+    The id is often not typed by the user at all ("our best-selling product"),
+    so falling back to the top row of a matching id column is what makes the
+    signals fire on those questions too.
+    """
+    match = pattern.search(question)
+    if match:
+        return match.group(0)
+    for sr in results.values():
+        for col_i, col in enumerate(sr.columns):
+            if col.lower().replace("_", "") not in id_columns:
+                continue
+            for row in sr.rows[:1]:
+                if col_i < len(row) and row[col_i]:
+                    found = pattern.search(str(row[col_i]))
+                    if found:
+                        return found.group(0)
+    return None
+
+
+async def _recommendation_signals(question: str, results: dict[str, SqlResult]) -> str:
+    """Measured signals backing the closing recommendation.
+
+    Computed here rather than left to the model: asked to recommend without
+    these, it produces advice that could have been written without seeing the
+    data ("offer an attractive discount"). Customer- and product-focused
+    questions get their own signal sets, and a question naming both (e.g.
+    "should we sell P_x to C_y") gets both. Never raises — a failure here just
+    means the answer closes with a softer recommendation.
+    """
+    blocks: list[str] = []
+    try:
+        cid = _find_entity_id(_CUSTOMER_ID_RE, question, results, ("customerid",))
+        if cid:
+            blocks.append(await customer_signals(cid, _run_sql))
+        pid = _find_entity_id(_PRODUCT_ID_RE, question, results, ("productid",))
+        if pid:
+            blocks.append(await product_signals(pid, _run_sql))
+    except Exception:  # noqa: BLE001 - signals are an enhancement, never fatal
+        return ""
+    return "\n".join(b for b in blocks if b)
+
+
 def _discriminator_summary(results: dict[str, SqlResult]) -> str:
     """Pre-computed ranking of which features separate the compared classes.
 
@@ -1123,6 +1218,7 @@ def _compose_prompt(
     ctx: SessionState,
     results: dict[str, SqlResult],
     assumption: str,
+    signals: str = "",
 ) -> str:
     context = ctx.render_context(
         question,
@@ -1146,6 +1242,7 @@ Assumption:
 Results:
 {samples}
 {_discriminator_summary(results)}
+{signals}
 
 Answer the user's question using these results. The user does not know the
 database, columns, SQL, or technical terminology.
@@ -1160,6 +1257,7 @@ async def _compose(
     results: dict[str, SqlResult],
     assumption: str,
 ) -> list[dict]:
+    signals = await _recommendation_signals(question, results)
     raw = await _llm_call_async(
         COMPOSER_SYSTEM,
         _compose_prompt(
@@ -1167,6 +1265,7 @@ async def _compose(
             ctx,
             results,
             assumption,
+            signals,
         ),
         temperature=0.2,
     )
@@ -1407,6 +1506,7 @@ def _narrative_prompt(
     ctx: SessionState,
     results: dict[str, SqlResult],
     assumption: str,
+    signals: str = "",
 ) -> str:
     context = ctx.render_context(question, active_ids=[])
     samples = ctx.result_samples(list(results.keys()))
@@ -1423,6 +1523,7 @@ Assumption:
 Results:
 {samples}
 {_discriminator_summary(results)}
+{signals}
 
 Answer the user's question using these results, as plain natural-language text.
 Do NOT return JSON.
@@ -1464,7 +1565,8 @@ async def _compose_text_stream(
     """Stream the natural-language narrative answer as text deltas."""
     if results:
         system = NARRATIVE_SYSTEM
-        user = _narrative_prompt(question, ctx, results, assumption)
+        signals = await _recommendation_signals(question, results)
+        user = _narrative_prompt(question, ctx, results, assumption, signals)
         temperature = 0.2
     else:
         system = CHAT_SYSTEM
