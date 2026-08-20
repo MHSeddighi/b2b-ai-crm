@@ -97,6 +97,10 @@ def test_customer_summary_cached_and_reused(monkeypatch):
         assert second["status"] == "ready"
         assert second["generated"] is False
         assert second["summary"] == first["summary"]
+        # The «تازه‌سازی» button must regenerate even when the cache is fresh.
+        again = await intel_summary.customer_summary(payload, refresh=True)
+        assert again["status"] == "ready"
+        assert again["generated"] is True
     asyncio.run(run())
 
 
@@ -123,6 +127,10 @@ def test_dashboard_summary_cached_and_reused(monkeypatch):
         assert second["status"] == "ready"
         assert second["generated"] is False
         assert second["summary"] == first["summary"]
+        # «تازه‌سازی» on a fresh cache must force a regeneration.
+        again = await intel_summary.dashboard_summary(det, refresh=True)
+        assert again["status"] == "ready"
+        assert again["generated"] is True
     asyncio.run(run())
 
 
@@ -146,6 +154,38 @@ def test_customer_summary_fingerprint_stable_across_fresh_payloads(monkeypatch):
         assert second["status"] == "ready"
         assert second["generated"] is False
         assert second["summary"] == first["summary"]
+    asyncio.run(run())
+
+
+def test_summary_refresh_concurrent_requests_reuse_one_result(monkeypatch):
+    """Two simultaneous «تازه‌سازی» clicks must produce ONE LLM call: the
+    second request waits for the first and reuses its freshly-saved result."""
+    calls = 0
+
+    async def fake_generate_llm(kind, prompt):
+        nonlocal calls
+        calls += 1
+        return f"وضعیت کلی: نسخه {calls}"
+
+    monkeypatch.setattr(intel_summary, "_generate_llm", fake_generate_llm)
+
+    cid = _any_customer()
+    for kind, key in (("customer360", cid), ("customer360_data", cid)):
+        p = store._path(kind, key)
+        if p.exists():
+            p.unlink()
+
+    async def run():
+        payload = api_data.customer_360(cid)
+        r1 = await intel_summary.customer_summary(payload, refresh=True)
+        r2 = await intel_summary.customer_summary(payload, refresh=True)
+        assert r1["status"] == "ready" and r1["generated"] is True
+        assert r2["status"] == "ready" and r2["generated"] is True
+        assert calls == 2, "each click regenerates"
+        # Now a plain read reuses the last saved result without any LLM call.
+        r3 = await intel_summary.customer_summary(payload)
+        assert r3["generated"] is False and r3["summary"] == r2["summary"]
+        assert calls == 2
     asyncio.run(run())
 
 

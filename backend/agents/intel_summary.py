@@ -194,22 +194,37 @@ async def _generate(kind: str, key: str, context: dict[str, Any],
 
     Without ``refresh`` this is a pure cache read: ready when the cached
     fingerprint matches, otherwise ``generating`` (a computation is in flight)
-    or ``not_ready`` — it NEVER triggers generation. With ``refresh=True`` it
-    regenerates on demand: if another computation is already in flight for the
-    same key, it waits for that computation to finish and reuses its result
-    (no duplicate LLM calls, no client polling loop)."""
+    or ``not_ready`` — it NEVER triggers generation.
+
+    With ``refresh=True`` it regenerates on demand, even when the cached text
+    is still fresh (that is the whole point of the «تازهسازی» button). If
+    another computation for the same key is already in flight, it waits for
+    that computation to finish and reuses its just-saved result instead of
+    issuing a duplicate LLM call (no client polling loop either)."""
     if not refresh:
         return await summary_status(kind, key, fp)
 
     while True:
-        entry = store.load(kind, key)
-        if entry is not None and entry.get("fingerprint") == fp:
-            return {"status": "ready", "summary": entry["value"], "generated": False}
         async with _GUARD_LOCK:
-            if key not in _COMPUTING:
+            if key in _COMPUTING:
+                busy = True
+            else:
                 _COMPUTING.add(key)
+                busy = False
+        if not busy:
+            break  # we own the computation slot — generate below
+        # Someone else is already refreshing this key: wait for their result
+        # to land, then reuse it (the save happens before the slot is freed).
+        while True:
+            async with _GUARD_LOCK:
+                done = key not in _COMPUTING
+            if done:
                 break
-        await asyncio.sleep(0.4)
+            await asyncio.sleep(0.4)
+        entry = store.load(kind, key)
+        if entry is not None:
+            return {"status": "ready", "summary": entry["value"], "generated": False}
+        # (rare: the other computation crashed before saving — retry as owner)
 
     try:
         summary = await _generate_llm(kind, prompt_builder(context))

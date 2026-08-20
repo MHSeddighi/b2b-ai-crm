@@ -502,7 +502,7 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-primary" />
             <CardTitle className="text-sm">خلاصه هوشمند</CardTitle>
-            {summaryText && (
+            {summaryText && !refreshing && (
               <Badge variant="outline" className="mr-auto gap-1 border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                 <BadgeCheck className="h-3 w-3" />
                 آماده
@@ -515,10 +515,10 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           </div>
         </CardHeader>
         <CardContent>
-          {summaryText ? (
-            <SummaryText text={summaryText} />
-          ) : refreshing ? (
+          {refreshing ? (
             <SummaryLoader />
+          ) : summaryText ? (
+            <SummaryText text={summaryText} />
           ) : (
             <div className="flex flex-col items-start gap-3">
               <p className="text-sm text-muted-foreground">
