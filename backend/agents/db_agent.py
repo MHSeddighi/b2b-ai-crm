@@ -17,6 +17,7 @@ from backend.agents.analysis import rank_discriminators
 from backend.agents.context import SessionState, answer_preview
 from backend.agents.contracts import CRM_TOOLS
 from backend.agents.recommend import customer_signals, product_signals
+from backend.agents.persian import fix_persian_zwnj
 from backend.agents.trace import Trace
 from backend.config import settings
 from backend.mcp.schema_context import CUSTOMER360_SCHEMA
@@ -326,6 +327,9 @@ Rules:
   "algorithm", "signal", "score 92/100", "threshold", "backend", or any
   internal/technical term. Say what the facts mean in plain business words
   (e.g. "مدت‌هاست خرید نکرده", "شکایت باز دارد", "در پرداخت مشکل دارد").
+- Persian orthography: ALWAYS write compound words with نیمفاصله (ZWNJ,
+  U+200C), e.g. می‌شود، می‌کنند، حل‌نشده، جلسه‌ای، مشتری‌ها، یکی‌یکی — never
+  join them without the half-space.
 - Never invent or recalculate numbers.
 - If the data is insufficient, say so clearly.
 - Do not use headings like "Insight", "Finding", or "Analysis".
@@ -400,6 +404,8 @@ CHAT_SYSTEM = """
 به فارسی و طبیعی صحبت کن.
 کوتاه و مستقیم پاسخ بده.
 از اصطلاحات فنی غیرضروری استفاده نکن.
+همیشه کلمات مرکب را با نیم‌فاصله بنویس (می‌شود، می‌کنند، حل‌نشده، مشتری‌ها،
+یکی‌یکی، جلسه‌ای) — هرگز بدون نیم‌فاصله.
 اگر کاربر از «قطع شدن ارتباط»، «ارتباط با سرور»، «سرور پشتیبان»، «نتونست وصل بشه» یا
 خطاهای مشابه در حین پاسخ‌گویی می‌پرسد، این مربوط به سرویس پشتیبان داخلی است، نه اینترنت
 یا تلفن کاربر. عذرخواهی کن، توضیح بده که به‌طور موقت اختلالی پیش آمده و دوباره سؤالش را
@@ -450,6 +456,9 @@ Rules:
   Explain the WHY with the concrete facts from the results (last purchase
   date, complaint count, order volume, payment behaviour) — not with the
   machinery that computed them.
+- Persian orthography: ALWAYS write compound words with نیمفاصله (ZWNJ,
+  U+200C), e.g. می‌شود، می‌کنند، حل‌نشده، جلسه‌ای، مشتری‌ها، یکی‌یکی،
+  به‌احتمال، پر‌ارزش، گرفته‌اند — never join them without the half-space.
 
 RECOMMENDATION SAFETY RULES (mandatory):
 - Never invent CRM metrics, customer signals, business conditions,
@@ -873,7 +882,13 @@ async def _auto_chain_action_plans(
     session = await _ensure_mcp()
     for cid in ids:
         plan_key = f"action_plan:{cid}"
+        direct_key = f"get_customer_action_plan:{cid}"
+        # Already fetched by the plan's own step (key get_customer_action_plan:<id>)
+        # or by a previous chaining pass (action_plan:<id>) — never call twice.
         if plan_key in crm_results:
+            continue
+        if direct_key in crm_results:
+            crm_results[plan_key] = crm_results[direct_key]
             continue
         try:
             plan = await _call_crm_tool(
@@ -1404,6 +1419,28 @@ def _render_action_plan(data: dict[str, Any]) -> str:
     return f"action plan for {cid}:\n" + "\n".join(parts)
 
 
+def _fix_blocks_text(blocks: list[dict]) -> list[dict]:
+    """Restore Persian نیمفاصله (ZWNJ) in user-facing block text.
+
+    LLM output frequently drops ZWNJ (حلنشده instead of حلنشده, جلسهی instead
+    of جلسهای). Fix markdown/recommendation content deterministically before
+    it reaches the UI.
+    """
+    out: list[dict] = []
+    for b in blocks:
+        b = dict(b)
+        btype = b.get("type")
+        if btype in ("markdown", "recommendation"):
+            for field in ("content", "text", "title", "reason"):
+                if isinstance(b.get(field), str):
+                    b[field] = fix_persian_zwnj(b[field])
+        elif btype == "table":
+            if isinstance(b.get("title"), str):
+                b["title"] = fix_persian_zwnj(b["title"])
+        out.append(b)
+    return out
+
+
 def _render_crm(crm_results: dict[str, Any], max_chars: int = 2500) -> str:
     """Render deterministic CRM tool results as a compact block.
 
@@ -1572,13 +1609,13 @@ async def _compose(
     parsed = contracts.parse_blocks_json(raw)
 
     if isinstance(parsed, list):
-        return parsed
+        return _fix_blocks_text(parsed)
 
     return [
         {
             "id": "b1",
             "type": "markdown",
-            "content": str(raw),
+            "content": fix_persian_zwnj(str(raw)),
         }
     ]
 
@@ -1614,13 +1651,15 @@ async def _chat_answer(
 
     return {
         "blocks": validate_blocks(
-            [
-                {
-                    "id": "b1",
-                    "type": "markdown",
-                    "content": raw,
-                }
-            ]
+            _fix_blocks_text(
+                [
+                    {
+                        "id": "b1",
+                        "type": "markdown",
+                        "content": raw,
+                    }
+                ]
+            )
         ),
         "results": {},
     }
@@ -1974,7 +2013,7 @@ async def _compose_blocks(
     )
     parsed = contracts.parse_blocks_json(raw)
     if isinstance(parsed, list):
-        return [b for b in parsed if b.get("type") != "markdown"]
+        return _fix_blocks_text([b for b in parsed if b.get("type") != "markdown"])
     return []
 
 

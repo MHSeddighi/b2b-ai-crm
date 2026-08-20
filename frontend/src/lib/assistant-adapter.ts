@@ -17,6 +17,7 @@ import type {
 
 import { fetchCopilotAnswerStream, type ChatHistoryItem, type TraceEvent } from "@/lib/chat-api";
 import type { Block, SqlResult } from "@/lib/blocks";
+import { fixPersianZwnj } from "@/lib/persian";
 
 export const UNREACHABLE_MSG =
   "متأسفانه به سرور پشتیبان متصل نشدم. لطفاً مطمئن شوید سرور پشتیبان در حال اجراست و دوباره تلاش کنید.";
@@ -96,7 +97,7 @@ function buildContent(
     } as ThreadAssistantMessagePart);
   }
   if (narrative) {
-    parts.push({ type: "text", text: narrative, status: { type: status } });
+    parts.push({ type: "text", text: fixPersianZwnj(narrative), status: { type: status } });
   }
   return parts;
 }

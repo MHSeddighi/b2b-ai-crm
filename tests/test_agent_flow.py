@@ -231,3 +231,55 @@ async def test_at_risk_question_auto_chains_action_plans():
     assert "action_plan:C_683666" in seen["crm"]
     # the engine-computed actions are passed to the composer
     assert seen["crm"]["action_plan:C_117580"]["next_best_actions"][0]["action_id"] == "RETENTION_CALL"
+
+
+@pytest.mark.asyncio
+async def test_action_plan_not_fetched_twice_when_plan_has_direct_step():
+    """If the LLM plan already contains a get_customer_action_plan step for a
+    customer, the auto-chainer must NOT call it again (exactly one MCP call)."""
+
+    class DedupSession:
+        def __init__(self):
+            self.calls = []
+
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name, arguments=None):
+            self.calls.append((name, arguments or {}))
+            if name == "top_at_risk_customers":
+                return _TextResult(json.dumps({
+                    "columns": ["Customer_ID", "complaints", "orders", "bounced", "risk_score"],
+                    "rows": [["C_117580", 9, 622, 3, 92]],
+                    "n_rows": 1,
+                }))
+            if name == "get_customer_action_plan":
+                return _TextResult(json.dumps({
+                    "customer_id": (arguments or {}).get("customer_id"),
+                    "state": {"churn_risk": {"status": "critical"}},
+                    "reasons": [],
+                    "next_best_actions": [{"action_id": "RETENTION_CALL"}],
+                    "data_quality": {"overall": 0.9},
+                    "calculated_at": "2024-01-01T00:00:00",
+                }))
+            raise AssertionError(f"unexpected tool {name}")
+
+    # Plan calls top_at_risk_customers AND a direct action plan step for C_117580.
+    plan = ('{"intent":"at_risk","assumption":"","steps":['
+            '{"tool":"top_at_risk_customers","input":{"limit":10}},'
+            '{"tool":"get_customer_action_plan","input":{"customer_id":"C_117580"}}]}')
+    session = DedupSession()
+    seen: dict = {}
+
+    async def fake_compose(question, ctx, results, assumption, crm_results=None, trace=None):
+        seen["crm"] = dict(crm_results or {})
+        return [{"id": "b1", "type": "markdown", "content": "ok"}]
+
+    with patch.object(db_agent, "_llm_call_async", new=AsyncMock(return_value=plan)), \
+         patch.object(db_agent, "_ensure_mcp", new=AsyncMock(return_value=session)), \
+         patch.object(db_agent, "_compose", new=fake_compose):
+        await db_agent._database_answer("at risk?", db_agent.SessionState("t"))
+
+    action_calls = [c for c in session.calls if c[0] == "get_customer_action_plan"]
+    assert len(action_calls) == 1, f"expected exactly ONE action plan call, got {len(action_calls)}"
+    assert seen["crm"].get("action_plan:C_117580"), "action_plan key missing for the customer"

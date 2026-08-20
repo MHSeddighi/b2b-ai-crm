@@ -16,6 +16,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatNumber } from "@/lib/utils";
+import { fixPersianZwnj } from "@/lib/persian";
 import {
   resolveChartData,
   resolveMetricValue,
@@ -71,7 +72,7 @@ function ChartTooltip({ active, payload, label }: {
 function MarkdownBlock({ content }: { content: string }) {
   return (
     <div className="prose-sm max-w-none text-sm leading-relaxed [&_table]:text-xs [&_table]:border [&_td]:border [&_th]:border [&_td]:px-2 [&_th]:px-2 [&_td]:py-1 [&_th]:py-1 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1">
-      <ReactMarkdown>{content}</ReactMarkdown>
+      <ReactMarkdown>{fixPersianZwnj(content)}</ReactMarkdown>
     </div>
   );
 }
@@ -255,7 +256,7 @@ function TableBlockView({ block, results }: { block: TableBlock; results: Record
       {table.title && <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground">{table.title}</div>}
       <div className="max-h-64 overflow-auto">
         <table className="w-full text-right text-xs">
-          <thead className="sticky top-0 bg-muted/80">
+          <thead className="sticky top-0 bg-muted text-muted-foreground">
             <tr>
               {table.columns.map((c) => (
                 <th key={c} className="whitespace-nowrap px-2.5 py-1.5 font-semibold text-muted-foreground">{c}</th>
