@@ -113,6 +113,11 @@ CRITICAL ROUTING RULES:
 - For "which customers are at risk / likely to churn / should be watched" across
   ALL customers, use top_at_risk_customers with a small limit (e.g. 10), NOT
   SQL. Do not try to compute the risk yourself.
+- The system AUTOMATICALLY calls get_customer_action_plan for every customer
+  the plan touches (the at-risk list and any per-customer tool). So do NOT
+  add one get_customer_action_plan step per at-risk customer yourself — a
+  single top_at_risk_customers step is enough, and the recommendations will
+  be computed by the analysis engine for you.
 - Use the query tool only for factual lookups / aggregations that the CRM
   tools do not cover.
 - The CRM tools return backend-computed values; you must not invent or
@@ -317,12 +322,20 @@ Rules:
   tailored to what the user asked.
 - Highlight an important pattern or implication when useful.
 - Never mention SQL, tables, columns, result IDs, or internal tools.
+- The user is a NON-TECHNICAL sales manager: never mention "risk score",
+  "algorithm", "signal", "score 92/100", "threshold", "backend", or any
+  internal/technical term. Say what the facts mean in plain business words
+  (e.g. "مدت‌هاست خرید نکرده", "شکایت باز دارد", "در پرداخت مشکل دارد").
 - Never invent or recalculate numbers.
 - If the data is insufficient, say so clearly.
 - Do not use headings like "Insight", "Finding", or "Analysis".
 - Keep the answer concise and natural.
 - When the results are numeric or a trend, always add a chart, metric, or table
   to visualize them — do not leave numbers as plain text alone.
+- If an action plan is available for a customer (under "Deterministic customer
+  intelligence" as an "action plan for <id>"), base the recommendation block on
+  it — the recommended actions are computed by the analysis engine, and you
+  may explain them in plain language but never change or invent them.
 - If there is an assumption, reflect it naturally and briefly in the answer.
 - Use the "markdown" type for prose (never "text"; the content field is
   "content"). Use "columns" (never "headers") in tables.
@@ -429,10 +442,14 @@ Rules:
   بزرگ است و پاسخ در چند مرحله آماده شد…") and then continue. Keep such notes
   short and natural.
 - When discussing churn, at-risk customers, retention, or recommendations,
-  briefly say the assessment is based on the CRM's customer-intelligence
-  signals (complaint volume, purchase recency, order volume, bounced checks)
-  and the risk-scoring algorithm, then explain which signals drive the risk for
-  the specific customers. Do this naturally in the user's language.
+  speak to a NON-TECHNICAL sales manager in plain business language. NEVER
+  mention "risk score", "algorithm", "signal", "score 92/100", "threshold",
+  "backend", or any internal/technical term. Instead say what is actually
+  happening in plain words, e.g. "این مشتری‌ها مدت‌هاست خرید نکرده‌اند",
+  "شکایت‌های باز دارند", "در پرداخت‌ها مشکل داشته‌اند", "حجم خریدشان بالاست".
+  Explain the WHY with the concrete facts from the results (last purchase
+  date, complaint count, order volume, payment behaviour) — not with the
+  machinery that computed them.
 
 RECOMMENDATION SAFETY RULES (mandatory):
 - Never invent CRM metrics, customer signals, business conditions,
@@ -445,6 +462,11 @@ RECOMMENDATION SAFETY RULES (mandatory):
   present in the tool output.
 - If the required tool data is unavailable or insufficient, say so explicitly
   and do not guess.
+- Every recommendation must be presented in plain business language for a
+  NON-TECHNICAL reader: never mention the action id, "priority", "confidence",
+  "signal", "score", "algorithm", or the tool names that produced it. Say the
+  action as a human instruction (e.g. "با این مشتری تماس بگیرید و شکایتش را
+  حل کنید", "به‌جای فروش اعتباری، پرداخت نقدی یا کوتاه‌تر پیشنهاد دهید").
 - If a result's n_rows is much larger than the handful of sample rows you were
   given, say plainly that the analysis reflects a representative sample of the
   full data, not an exhaustive count — describe patterns/trends qualitatively
@@ -810,6 +832,57 @@ async def _call_crm_tool(session: ClientSession, tool: str,
     if trace is not None:
         trace.tool(tool, args, data, int((time.monotonic() - t0) * 1000), ok=True)
     return data
+
+
+# How many at-risk customers get an automatically-chained action plan at most.
+MAX_ACTION_PLANS = 10
+
+
+async def _auto_chain_action_plans(
+    crm_results: dict[str, Any],
+    trace: Trace | None = None,
+) -> list[str]:
+    """Deterministically fetch action plans for customers the plan touched.
+
+    The analysis system, not the LLM, decides which customers need a
+    recommendation: every customer returned by ``top_at_risk_customers`` and
+    every customer explicitly queried via the per-customer CRM tools gets a
+    ``get_customer_action_plan`` call, stored under ``action_plan:<id>``. This
+    guarantees the answer always recommends from the deterministic engine
+    instead of relying on the model to remember to ask.
+
+    Returns the list of customer ids chained (best-effort; never raises).
+    """
+    ids: list[str] = []
+    for key, data in crm_results.items():
+        if key.startswith("top_at_risk_customers:"):
+            cols = data.get("columns", []) if isinstance(data, dict) else []
+            if "Customer_ID" in cols:
+                i = cols.index("Customer_ID")
+                for row in (data.get("rows") or []):
+                    if i < len(row) and row[i] and str(row[i]) not in ids:
+                        ids.append(str(row[i]))
+        elif key.startswith("get_customer_") and ":" in key:
+            cid = key.split(":", 1)[1]
+            if cid and cid not in ids:
+                ids.append(cid)
+    ids = ids[:MAX_ACTION_PLANS]
+    if not ids:
+        return []
+    chained: list[str] = []
+    session = await _ensure_mcp()
+    for cid in ids:
+        plan_key = f"action_plan:{cid}"
+        if plan_key in crm_results:
+            continue
+        try:
+            plan = await _call_crm_tool(
+                session, "get_customer_action_plan", {"customer_id": cid}, trace)
+        except Exception:  # noqa: BLE001 - action plans are an enhancement
+            continue
+        crm_results[plan_key] = plan
+        chained.append(cid)
+    return chained
 
 
 async def _run_sql(sql: str) -> dict[str, Any]:
@@ -1294,12 +1367,57 @@ async def _plan_stream(
     yield ("plan", plan)
 
 
+def _render_action_plan(data: dict[str, Any]) -> str:
+    """Compact human-readable rendering of one get_customer_action_plan result.
+
+    Keeps the deterministic recommendation (state summary + top actions) small
+    enough to inline into a prompt even for several customers at once.
+    """
+    parts: list[str] = []
+    cid = data.get("customer_id") or "?"
+    state = data.get("state") or {}
+    if isinstance(state, dict):
+        dims = []
+        for dim, val in state.items():
+            if isinstance(val, dict) and val.get("status"):
+                dims.append(f"{dim}={val.get('status')}")
+        if dims:
+            parts.append(f"state: {', '.join(dims)}")
+    actions = data.get("next_best_actions") or []
+    for a in actions[:3]:
+        if not isinstance(a, dict):
+            continue
+        name = a.get("name") or a.get("action_id") or "?"
+        reason = a.get("reason") or ""
+        step = a.get("suggested_next_step") or ""
+        priority = a.get("priority")
+        line = f"- {name}"
+        if priority is not None:
+            line += f" (priority {priority})"
+        if reason:
+            line += f": {reason}"
+        if step:
+            line += f" -> {step}"
+        parts.append(line)
+    if not parts:
+        parts.append("(no recommended actions)")
+    return f"action plan for {cid}:\n" + "\n".join(parts)
+
+
 def _render_crm(crm_results: dict[str, Any], max_chars: int = 2500) -> str:
-    """Render deterministic CRM tool results as a compact JSON block."""
+    """Render deterministic CRM tool results as a compact block.
+
+    ``action_plan:*`` entries (auto-fetched per customer) are rendered with
+    ``_render_action_plan`` so several plans fit in one prompt; everything else
+    is dumped as JSON truncated to ``max_chars``.
+    """
     if not crm_results:
         return ""
     parts: list[str] = []
     for key, data in crm_results.items():
+        if key.startswith("action_plan:"):
+            parts.append(_render_action_plan(data))
+            continue
         js = json.dumps(data, ensure_ascii=False, default=str)
         parts.append(f"CRM result [{key}]:\n{js[:max_chars]}")
     return "\n\n".join(parts)
@@ -1599,6 +1717,16 @@ async def _database_answer(
 
         else:
             return _error("نوع درخواست قابل تشخیص نیست.")
+
+    # Deterministic chaining: any customer the plan touched (at-risk list or
+    # per-customer tools) automatically gets its action plan fetched, so the
+    # recommendation always comes from the analysis engine.
+    if trace is not None:
+        trace.stage("actions", "در حال محاسبه اقدام‌های پیشنهادی")
+    try:
+        await _auto_chain_action_plans(crm_results, trace)
+    except Exception:  # noqa: BLE001 - chaining is an enhancement, never fatal
+        pass
 
     if trace is not None:
         trace.stage("composing", "در حال آماده‌سازی پاسخ")
@@ -2005,6 +2133,20 @@ async def _database_answer_stream(
         else:
             yield {"type": "error", "message": "نوع درخواست قابل تشخیص نیست."}
             return
+
+    # Deterministic chaining: any customer the plan touched automatically gets
+    # its action plan fetched, so recommendations come from the engine.
+    if trace is not None:
+        trace.stage("actions", "در حال محاسبه اقدام‌های پیشنهادی")
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
+    try:
+        await _auto_chain_action_plans(crm_results, trace)
+    except Exception:  # noqa: BLE001 - chaining is an enhancement, never fatal
+        pass
+    if trace is not None:
+        for ev in trace.drain():
+            yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
 
     # Stream the narrative answer text.
     if trace is not None:

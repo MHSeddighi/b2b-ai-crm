@@ -51,7 +51,9 @@ def top_at_risk_customers(limit: int = 10) -> str:
     Computed deterministically in a single SQL pass over the same signals the
     deterministic engine uses: complaint volume, purchase recency (days since
     the last purchase), order volume, and bounced checks. The LLM must NOT
-    recompute or alter these scores.
+    recompute or alter these scores. The result includes richer customer
+    context (segment, status, revenue, days since last purchase) so the answer
+    can be grounded in plain business facts, not just a score.
     """
     limit = max(1, min(int(limit or 10), 50))
     con = data.connect()
@@ -62,12 +64,18 @@ def top_at_risk_customers(limit: int = 10) -> str:
         WITH agg AS (
           SELECT
             c.Customer_ID,
+            c.Customer_Segment,
+            c.Customer_Status,
+            c.Credit_Limit,
+            c.Payment_Terms_Days,
             (SELECT COUNT(*) FROM complaints co
               WHERE co.Customer_ID = c.Customer_ID) AS complaints,
             (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
               WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
             (SELECT COUNT(DISTINCT s."شماره فاکتور") FROM sales s
               WHERE s.Customer_ID = c.Customer_ID) AS orders,
+            (SELECT COALESCE(SUM(s."مبلغ کل"), 0) FROM sales s
+              WHERE s.Customer_ID = c.Customer_ID) AS revenue,
             (SELECT COUNT(*) FROM collections col
               WHERE col.Customer_ID = c.Customer_ID
                 AND col."چک برگشتی" = 'بله') AS bounced
@@ -75,9 +83,13 @@ def top_at_risk_customers(limit: int = 10) -> str:
         )
         SELECT
           Customer_ID,
+          Customer_Segment,
+          Customer_Status,
           complaints,
-          last_purchase,
           orders,
+          revenue,
+          last_purchase,
+          CAST({ref_lit} - last_purchase AS INT) AS days_since_last_purchase,
           bounced,
           CAST(LEAST(99,
             12

@@ -162,3 +162,72 @@ async def test_compose_blocks_returns_empty_without_any_data():
             results={}, assumption="", crm_results=None, trace=None,
         )
     assert blocks == []
+
+
+class _TextContent:
+    def __init__(self, text):
+        self.text = text
+
+
+class _TextResult:
+    def __init__(self, text):
+        self.content = [_TextContent(text)]
+
+
+@pytest.mark.asyncio
+async def test_at_risk_question_auto_chains_action_plans():
+    """A top_at_risk_customers question must deterministically chain
+    get_customer_action_plan for every returned customer (engine-driven
+    recommendations, not LLM-remembered)."""
+
+    class ChainSession:
+        def __init__(self):
+            self.calls = []
+
+        async def initialize(self):
+            return None
+
+        async def call_tool(self, name, arguments=None):
+            self.calls.append((name, arguments or {}))
+            if name == "top_at_risk_customers":
+                return _TextResult(json.dumps({
+                    "columns": ["Customer_ID", "complaints", "orders", "bounced", "risk_score"],
+                    "rows": [["C_117580", 9, 622, 3, 92], ["C_683666", 37, 44, 2, 92]],
+                    "n_rows": 2,
+                }))
+            if name == "get_customer_action_plan":
+                return _TextResult(json.dumps({
+                    "customer_id": (arguments or {}).get("customer_id"),
+                    "state": {"churn_risk": {"status": "critical"}},
+                    "reasons": [],
+                    "next_best_actions": [
+                        {"action_id": "RETENTION_CALL", "name": "Retention call",
+                         "priority": 0.9, "reason": "at risk",
+                         "suggested_next_step": "call the customer"},
+                    ],
+                    "data_quality": {"overall": 0.9},
+                    "calculated_at": "2024-01-01T00:00:00",
+                }))
+            raise AssertionError(f"unexpected tool {name}")
+
+    plan = ('{"intent":"at_risk","assumption":"","steps":['
+            '{"tool":"top_at_risk_customers","input":{"limit":10}}]}')
+    session = ChainSession()
+    seen: dict = {}
+
+    async def fake_compose(question, ctx, results, assumption, crm_results=None, trace=None):
+        seen["crm"] = dict(crm_results or {})
+        return [{"id": "b1", "type": "markdown", "content": "ok"}]
+
+    with patch.object(db_agent, "_llm_call_async", new=AsyncMock(return_value=plan)), \
+         patch.object(db_agent, "_ensure_mcp", new=AsyncMock(return_value=session)), \
+         patch.object(db_agent, "_compose", new=fake_compose):
+        await db_agent._database_answer("at risk?", db_agent.SessionState("t"))
+
+    tools = [c[0] for c in session.calls]
+    assert tools == ["top_at_risk_customers",
+                     "get_customer_action_plan", "get_customer_action_plan"]
+    assert "action_plan:C_117580" in seen["crm"]
+    assert "action_plan:C_683666" in seen["crm"]
+    # the engine-computed actions are passed to the composer
+    assert seen["crm"]["action_plan:C_117580"]["next_best_actions"][0]["action_id"] == "RETENTION_CALL"
