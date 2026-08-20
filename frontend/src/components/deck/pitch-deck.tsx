@@ -93,10 +93,10 @@ export function Deck({ fullscreen = false, onExit }: DeckProps) {
           size="sm"
           onClick={onExit}
           className="fixed left-4 top-4 z-20 gap-1.5 rounded-full shadow-lg"
-          aria-label="Exit presentation"
+          aria-label="خروج از ارائه"
         >
           <X className="h-4 w-4" />
-          Exit
+          خروج
         </Button>
       )}
 
@@ -128,7 +128,7 @@ export function Deck({ fullscreen = false, onExit }: DeckProps) {
             <button
               key={s.id}
               onClick={() => go(i)}
-              aria-label={`Go to slide ${i + 1}: ${s.label}`}
+              aria-label={`رفتن به اسلاید ${i + 1}: ${s.label}`}
               aria-current={i === current ? "true" : undefined}
               title={s.label}
               className={cn(
@@ -148,9 +148,9 @@ export function Deck({ fullscreen = false, onExit }: DeckProps) {
             className="h-8 w-8 rounded-full"
             onClick={() => go(current - 1)}
             disabled={current === 0}
-            aria-label="Previous slide"
+            aria-label="اسلاید قبلی"
           >
-            <ChevronLeft className="h-4 w-4" />
+            <ChevronRight className="h-4 w-4" />
           </Button>
           <Button
             variant="outline"
@@ -158,9 +158,9 @@ export function Deck({ fullscreen = false, onExit }: DeckProps) {
             className="h-8 w-8 rounded-full"
             onClick={() => go(current + 1)}
             disabled={current === total - 1}
-            aria-label="Next slide"
+            aria-label="اسلاید بعدی"
           >
-            <ChevronRight className="h-4 w-4" />
+            <ChevronLeft className="h-4 w-4" />
           </Button>
         </div>
       </div>

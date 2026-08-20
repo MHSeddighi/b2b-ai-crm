@@ -12,7 +12,6 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 export type View = "dashboard" | "customers" | "analyses" | "present";
 
@@ -26,10 +25,10 @@ interface SidebarProps {
 }
 
 const navItems: { key: View; label: string; icon: typeof LayoutDashboard }[] = [
-  { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { key: "customers", label: "Customers", icon: Users },
-  { key: "analyses", label: "Analyses", icon: BarChart3 },
-  { key: "present", label: "Present", icon: MonitorPlay },
+  { key: "dashboard", label: "داشبورد", icon: LayoutDashboard },
+  { key: "customers", label: "مشتریان", icon: Users },
+  { key: "analyses", label: "تحلیل‌ها", icon: BarChart3 },
+  { key: "present", label: "ارائه", icon: MonitorPlay },
 ];
 
 export function Sidebar({
@@ -56,17 +55,17 @@ export function Sidebar({
           </div>
           {!collapsed && (
             <div className="flex min-w-0 flex-col leading-tight">
-              <span className="truncate text-sm font-semibold">CustIntel</span>
-              <span className="truncate text-[11px] text-muted-foreground">AI Copilot</span>
+              <span className="truncate text-sm font-semibold">سامانه مشتری</span>
+              <span className="truncate text-[11px] text-muted-foreground">دستیار هوشمند</span>
             </div>
           )}
           {!collapsed && (
             <Button
               variant="ghost"
               size="icon"
-              className="ml-auto md:hidden"
+              className="mr-auto md:hidden"
               onClick={onCloseMobile}
-              aria-label="Close navigation"
+              aria-label="بستن منو"
             >
               <X className="h-4 w-4" />
             </Button>
@@ -74,7 +73,7 @@ export function Sidebar({
         </div>
 
         {/* Navigation */}
-        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2" aria-label="Main navigation">
+        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2" aria-label="منوی اصلی">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = view === item.key;
@@ -101,7 +100,7 @@ export function Sidebar({
           })}
         </nav>
 
-        {/* User footer */}
+        {/* Footer */}
         <div
           className={cn(
             "shrink-0",
@@ -110,22 +109,13 @@ export function Sidebar({
               : "flex items-center gap-2 p-3"
           )}
         >
-          <Avatar className="h-8 w-8 shrink-0">
-            <AvatarFallback className="bg-secondary text-xs font-medium">JD</AvatarFallback>
-          </Avatar>
-          {!collapsed && (
-            <div className="flex min-w-0 flex-1 flex-col leading-tight">
-              <span className="truncate text-sm font-medium">Jordan Diaz</span>
-              <span className="truncate text-[11px] text-muted-foreground">Analyst</span>
-            </div>
-          )}
           <ThemeToggle />
           <Button
             variant="ghost"
             size="icon"
             onClick={onToggleCollapsed}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-label={collapsed ? "باز کردن سایدبار" : "بستن سایدبار"}
+            title={collapsed ? "باز کردن سایدبار" : "بستن سایدبار"}
             className="hidden shrink-0 md:inline-flex"
           >
             {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
@@ -154,7 +144,7 @@ export function Sidebar({
             className="absolute inset-0 bg-black/50 animate-fade-in"
             onClick={onCloseMobile}
           />
-          <aside className="absolute inset-y-0 left-0 w-64 p-2 animate-fade-in-up">{content}</aside>
+          <aside className="absolute inset-y-0 right-0 w-64 p-2 animate-fade-in-up">{content}</aside>
         </div>
       )}
     </>

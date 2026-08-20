@@ -30,7 +30,18 @@ function AppShell() {
   });
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [copilotMode, setCopilotMode] = useState<CopilotMode>("float");
-  const [copilotPosition, setCopilotPosition] = useState<CopilotPosition>("se");
+  const [copilotPosition, setCopilotPosition] = useState<CopilotPosition>("sw");
+
+  // Stable backend session id; reset to start a fresh chat thread. Changing it
+  // recreates the assistant-ui runtime (which owns the message history), so the
+  // "new chat" action just mints a new id.
+  const [copilotSessionId, setCopilotSessionId] = useState(() =>
+    crypto.randomUUID()
+  );
+
+  function startNewChat() {
+    setCopilotSessionId(crypto.randomUUID());
+  }
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -128,43 +139,48 @@ function AppShell() {
           variant="secondary"
           size="icon"
           onClick={() => setMobileMenuOpen(true)}
-          aria-label="Open navigation"
+          aria-label="باز کردن منو"
           className="fixed left-2 top-2 z-40 rounded-full shadow-md md:hidden"
         >
           <Menu className="h-5 w-5" />
         </Button>
       )}
 
-      {/* Copilot: full-screen docked card next to the sidebar */}
-      {copilotOpen && copilotMode === "dock" && (
-        <aside className="fixed inset-0 z-50 flex flex-col p-2 md:p-3 lg:static lg:z-auto lg:flex-1 lg:animate-none lg:p-0">
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border shadow-sm">
+      {/* Copilot: one persistent instance; only its container switches between
+          docked (full-height panel next to the sidebar) and floating window.
+          Keeping the same mounted <Copilot> preserves the chat thread/state
+          when the user expands or collapses it. */}
+      {copilotOpen && (
+        <aside
+          aria-label="دستیار هوشمند"
+          className={cn(
+            "z-50 flex flex-col overflow-hidden",
+            docked
+              ? "fixed inset-0 p-2 md:p-3 lg:static lg:z-auto lg:flex-1 lg:animate-none lg:p-0"
+              : cn(
+                  "fixed",
+                  "h-[min(680px,calc(100vh-1rem))] w-[min(420px,calc(100vw-1rem))]",
+                  "md:h-[min(680px,calc(100vh-1.5rem))] md:w-[min(420px,calc(100vw-1.5rem))]",
+                  "rounded-2xl border bg-card shadow-2xl",
+                  "animate-in fade-in zoom-in-95 duration-200",
+                  PANEL_POSITION_CLASS[copilotPosition]
+                )
+          )}
+        >
+          <div
+            className={cn(
+              "flex min-h-0 flex-1 flex-col overflow-hidden",
+              docked ? "rounded-xl border bg-card shadow-sm" : "rounded-2xl"
+            )}
+          >
             <Copilot
-              mode="dock"
-              onToggleMode={() => setCopilotMode("float")}
+              mode={copilotMode}
+              onToggleMode={() => setCopilotMode(copilotMode === "dock" ? "float" : "dock")}
               onClose={() => setCopilotOpen(false)}
+              sessionId={copilotSessionId}
+              onNewChat={startNewChat}
             />
           </div>
-        </aside>
-      )}
-
-      {/* Copilot: floating window (at the chosen position) */}
-      {copilotOpen && copilotMode === "float" && (
-        <aside
-          className={cn(
-            "fixed z-50 flex flex-col overflow-hidden rounded-2xl border shadow-2xl",
-            "h-[min(680px,calc(100vh-1rem))] w-[min(420px,calc(100vw-1rem))]",
-            "md:h-[min(680px,calc(100vh-1.5rem))] md:w-[min(420px,calc(100vw-1.5rem))]",
-            "animate-in fade-in zoom-in-95 duration-200",
-            PANEL_POSITION_CLASS[copilotPosition]
-          )}
-          aria-label="AI Copilot"
-        >
-          <Copilot
-            mode="float"
-            onToggleMode={() => setCopilotMode("dock")}
-            onClose={() => setCopilotOpen(false)}
-          />
         </aside>
       )}
 
@@ -196,11 +212,11 @@ function AppShell() {
           }}
         >
           <Button
-            aria-label="Open Copilot"
+            aria-label="باز کردن دستیار هوشمند"
             className="pointer-events-none h-12 gap-2 rounded-full px-5 shadow-lg"
           >
             <Sparkles className="h-4 w-4" />
-            Copilot
+            دستیار
           </Button>
         </div>
       )}

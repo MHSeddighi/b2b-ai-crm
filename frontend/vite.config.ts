@@ -9,4 +9,6 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // No /api proxy: the frontend calls the Python backend (FastAPI + MCP)
+  // directly at its absolute URL (see src/lib/api.ts and chat-api.ts).
 });
