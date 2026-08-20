@@ -6,6 +6,7 @@ import {
   Landmark,
   Loader2,
   MessageSquareWarning,
+  PieChart as PieChartIcon,
   Sparkles,
   Target,
   TrendingDown,
@@ -19,12 +20,12 @@ import {
   BarChart,
   Cell,
   Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
   CartesianGrid,
+  PieChart,
 } from "recharts";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -35,6 +36,7 @@ import {
   type DashboardData,
   type KpiValue,
   type IncomeRecommendation,
+  type DistributionSlice,
   type SummaryStatus,
 } from "@/lib/api";
 import { formatCompact, formatCurrency, formatNumber, cn } from "@/lib/utils";
@@ -136,13 +138,13 @@ function SummaryText({ text }: { text: string }) {
   );
 }
 
-function RecommendationCard({ rec }: { rec: IncomeRecommendation }) {
+function RecommendationCard({ rec, wide }: { rec: IncomeRecommendation; wide?: boolean }) {
   const icon =
     rec.tone === "positive" ? <TrendingUp className="h-4 w-4" /> : rec.tone === "warning" ? <AlertTriangle className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />;
   return (
     <div
       className={cn(
-        "rounded-xl border p-4 transition-colors",
+        "flex h-full flex-col rounded-xl border p-4 transition-colors",
         rec.tone === "positive" && "border-emerald-500/30 bg-emerald-500/5",
         rec.tone === "warning" && "border-amber-500/30 bg-amber-500/5",
         rec.tone === "negative" && "border-red-500/30 bg-red-500/5"
@@ -159,11 +161,16 @@ function RecommendationCard({ rec }: { rec: IncomeRecommendation }) {
         >
           {icon}
         </span>
-        <div className="min-w-0 space-y-1">
+        <div className="min-w-0 flex-1 space-y-1">
           <p className="text-sm font-semibold leading-snug">{rec.title}</p>
-          <p className="text-xs leading-relaxed text-muted-foreground">{rec.detail}</p>
+          <p className={cn("text-xs leading-relaxed text-muted-foreground", wide && "md:text-sm")}>{rec.detail}</p>
         </div>
       </div>
+      {rec.impact > 0 && (
+        <p className="mt-3 border-t pt-2 text-xs font-medium tabular-nums text-muted-foreground">
+          تأثیر: {formatCurrency(rec.impact)} تومان
+        </p>
+      )}
     </div>
   );
 }
@@ -178,7 +185,7 @@ const riskChip: Record<string, string> = {
 
 function PurchaseTrendChart({ data }: { data: DashboardData["purchaseTrend"] }) {
   return (
-    <Card className="animate-fade-in-up" style={{ animationDelay: "240ms" }}>
+    <Card className="h-full animate-fade-in-up" style={{ animationDelay: "240ms" }}>
       <CardHeader>
         <CardTitle className="text-base">روند فروش</CardTitle>
         <CardDescription>حجم فروش ماهانه (مبالغ کل)</CardDescription>
@@ -208,7 +215,7 @@ function PurchaseTrendChart({ data }: { data: DashboardData["purchaseTrend"] }) 
 
 function ComplaintTrendChart({ data }: { data: DashboardData["complaintTrend"] }) {
   return (
-    <Card className="animate-fade-in-up" style={{ animationDelay: "300ms" }}>
+    <Card className="h-full animate-fade-in-up" style={{ animationDelay: "300ms" }}>
       <CardHeader>
         <CardTitle className="text-base">روند شکایات</CardTitle>
         <CardDescription>شکایات ثبت‌شده در هر ماه</CardDescription>
@@ -230,50 +237,69 @@ function ComplaintTrendChart({ data }: { data: DashboardData["complaintTrend"] }
   );
 }
 
-function DistributionChart({
-  title,
-  subtitle,
-  data,
-}: {
-  title: string;
-  subtitle: string;
-  data: DashboardData["segmentDistribution"];
-}) {
+function MiniDistribution({ title, data }: { title: string; data: DistributionSlice[] }) {
   const total = data.reduce((acc, d) => acc + d.value, 0);
+  if (data.length === 0) {
+    return (
+      <div>
+        <p className="mb-2 text-xs font-semibold text-muted-foreground">{title}</p>
+        <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">
+          داده‌ای موجود نیست.
+        </p>
+      </div>
+    );
+  }
   return (
-    <Card className="animate-fade-in-up" style={{ animationDelay: "360ms" }}>
+    <div>
+      <p className="mb-2 text-xs font-semibold text-muted-foreground">{title}</p>
+      <div className="flex items-center gap-4">
+        <div className="h-36 w-36 shrink-0">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie data={data} dataKey="value" nameKey="name" innerRadius={38} outerRadius={62} paddingAngle={2}>
+                {data.map((entry, i) => (
+                  <Cell key={entry.name} fill={pieColors[i % pieColors.length]} />
+                ))}
+              </Pie>
+              <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))", fontSize: 12 }} formatter={(v) => [formatCompact(Number(v)), "تعداد"]} />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="min-w-0 flex-1 space-y-2">
+          {data.map((d, i) => (
+            <div key={d.name} className="flex items-center justify-between gap-2 text-xs">
+              <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: pieColors[i % pieColors.length] }} />
+                <span className="truncate">{d.name}</span>
+              </span>
+              <span className="shrink-0 font-medium tabular-nums">
+                {formatCompact(d.value)}
+                <span className="mr-1 text-[10px] text-muted-foreground">
+                  {Math.round((d.value / (total || 1)) * 100)}٪
+                </span>
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CombinedDistribution({ data }: { data: DashboardData }) {
+  return (
+    <Card className="h-full animate-fade-in-up" style={{ animationDelay: "360ms" }}>
       <CardHeader>
-        <CardTitle className="text-base">{title}</CardTitle>
-        <CardDescription>{subtitle}</CardDescription>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <PieChartIcon className="h-4 w-4 text-muted-foreground" />
+          ترکیب مشتریان
+        </CardTitle>
+        <CardDescription>بخش بازار و وضعیت مشتریان در یک نگاه</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="flex items-center gap-6">
-          <div className="h-48 w-48 shrink-0">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={data} dataKey="value" nameKey="name" innerRadius={50} outerRadius={80} paddingAngle={2}>
-                  {data.map((entry, i) => (
-                    <Cell key={entry.name} fill={pieColors[i % pieColors.length]} />
-                  ))}
-                </Pie>
-                <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))", fontSize: 12 }} formatter={(v) => [formatCompact(Number(v)), "تعداد"]} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="flex-1 space-y-3">
-            {data.map((d, i) => (
-              <div key={d.name} className="flex items-center justify-between text-sm">
-                <span className="flex items-center gap-2 text-muted-foreground">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ background: pieColors[i % pieColors.length] }} />
-                  {d.name}
-                </span>
-                <span className="font-medium tabular-nums">
-                  {formatCompact(d.value)}
-                  <span className="mr-1 text-xs text-muted-foreground">{Math.round((d.value / (total || 1)) * 100)}٪</span>
-                </span>
-              </div>
-            ))}
-          </div>
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <MiniDistribution title="بخش بازار (سگمنت)" data={data.segmentDistribution} />
+          <MiniDistribution title="وضعیت مشتری" data={data.statusDistribution} />
         </div>
       </CardContent>
     </Card>
@@ -302,7 +328,7 @@ export function Dashboard() {
           };
           let tries = 0;
           const tick = async () => {
-            if (stopped || tries > 40) return;
+            if (stopped || tries > 200) return; // ~8 minutes budget
             tries += 1;
             try {
               const res2 = await fetchDashboardIntelligence();
@@ -368,7 +394,7 @@ export function Dashboard() {
         ))}
       </div>
 
-      {/* LLM overall analysis */}
+      {/* LLM overall analysis — full width */}
       <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
         <CardHeader className="pb-2">
           <div className="flex items-center gap-2">
@@ -387,199 +413,227 @@ export function Dashboard() {
         </CardContent>
       </Card>
 
-      {/* Income recommendations */}
+      {/* Income recommendations — 4 compact + 1 full-width (no empty slot) */}
       <div>
         <div className="mb-3 flex items-center gap-2">
           <Target className="h-4 w-4 text-primary" />
           <h2 className="text-base font-semibold">پیشنهادها برای درآمد بهتر</h2>
         </div>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {data.recommendations.map((rec) => (
-            <RecommendationCard key={rec.id} rec={rec} />
-          ))}
+          {data.recommendations.map((rec, i) => {
+            const wide = i === data.recommendations.length - 1 && data.recommendations.length % 2 === 1;
+            return (
+              <div key={rec.id} className={cn(wide && "lg:col-span-2")}>
+                <RecommendationCard rec={rec} wide={wide} />
+              </div>
+            );
+          })}
         </div>
       </div>
 
+      {/* Trend charts */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <PurchaseTrendChart data={data.purchaseTrend} />
         <ComplaintTrendChart data={data.complaintTrend} />
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <DistributionChart title="توزیع سگمنت مشتریان" subtitle="تعداد مشتریان بر اساس سگمنت" data={data.segmentDistribution} />
-        <DistributionChart title="وضعیت مشتریان" subtitle="تعداد مشتریان بر اساس وضعیت" data={data.statusDistribution} />
-      </div>
+      {/* Merged distribution card */}
+      <CombinedDistribution data={data} />
 
-      {/* Overall analysis sections (expand on click) */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <ExpandableSection
-          icon={AlertTriangle}
-          title="مشتریان در معرض از دست رفتن"
-          count={intel.at_risk.count}
-          badge={
-            <Badge variant="outline" className="gap-1 border-transparent bg-red-500/10 text-red-600 dark:text-red-400">
-              {formatCurrency(intel.at_risk.revenue)} در خطر
-            </Badge>
-          }
-          preview={
-            <div className="space-y-2">
-              {intel.at_risk.top.slice(0, 3).map((r) => (
-                <div key={r.customer_id} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
-                  <div className="min-w-0 leading-tight">
-                    <p className="text-xs font-medium tabular-nums">{r.customer_id}</p>
-                    <p className="text-[10px] text-muted-foreground">
-                      {formatNumber(r.complaints)} شکایت · {formatNumber(r.orders)} سفارش
-                      {r.days_since != null && <span> · آخرین خرید {formatNumber(r.days_since)} روز پیش</span>}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-left">
-                    <p className="text-xs font-medium tabular-nums">{formatCurrency(r.revenue)}</p>
-                    <span className={cn("inline-block rounded-md px-1.5 py-0.5 text-[10px]", riskChip[levelOf(r.risk_score)] ?? riskChip["متوسط"])}>
-                      {levelOf(r.risk_score)}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          }
-          full={
-            <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
-              {intel.at_risk.top.map((r) => (
-                <div key={r.customer_id} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
-                  <div className="min-w-0 leading-tight">
-                    <p className="text-xs font-medium tabular-nums">{r.customer_id}</p>
-                    <p className="text-[10px] text-muted-foreground">
-                      {formatNumber(r.complaints)} شکایت · {formatNumber(r.orders)} سفارش
-                      {r.days_since != null && <span> · آخرین خرید {formatNumber(r.days_since)} روز پیش</span>}
-                      {r.bounced > 0 && <span> · {formatNumber(r.bounced)} چک برگشتی</span>}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-left">
-                    <p className="text-xs font-medium tabular-nums">{formatCurrency(r.revenue)}</p>
-                    <span className={cn("inline-block rounded-md px-1.5 py-0.5 text-[10px]", riskChip[levelOf(r.risk_score)] ?? riskChip["متوسط"])}>
-                      {levelOf(r.risk_score)}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          }
-        />
-
-        <ExpandableSection
-          icon={MessageSquareWarning}
-          title="موضوع‌های پرتکرار شکایت"
-          count={intel.complaint_themes.length}
-          preview={
-            <div className="space-y-2">
-              {intel.complaint_themes.slice(0, 3).map((t) => (
-                <div key={t.name} className="flex items-center gap-3">
-                  <span className="w-32 truncate text-xs text-muted-foreground">{t.name}</span>
-                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                    <div className="h-full rounded-full bg-amber-500/70" style={{ width: `${(t.count / maxTheme) * 100}%` }} />
-                  </div>
-                  <span className="w-10 text-left text-xs font-medium tabular-nums">{formatNumber(t.count)}</span>
-                </div>
-              ))}
-            </div>
-          }
-          full={
-            <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
-              {intel.complaint_themes.map((t) => (
-                <div key={t.name} className="flex items-center gap-3">
-                  <span className="w-40 truncate text-xs text-muted-foreground">{t.name}</span>
-                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                    <div className="h-full rounded-full bg-amber-500/70" style={{ width: `${(t.count / maxTheme) * 100}%` }} />
-                  </div>
-                  <span className="w-10 text-left text-xs font-medium tabular-nums">{formatNumber(t.count)}</span>
-                </div>
-              ))}
-            </div>
-          }
-        />
-
-        <ExpandableSection
-          icon={Target}
-          title="اثربخشی پیشنهادها"
-          count={intel.offer_effectiveness.length}
-          preview={
-            <div className="space-y-2">
-              {intel.offer_effectiveness.slice(0, 3).map((o) => (
-                <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
-                  <p className="text-xs font-medium">{o.type}</p>
-                  <div className="flex items-center gap-2">
-                    <div className="h-2 w-24 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${o.rate * 100}%` }} />
+      {/* Overall analysis sections — varied responsive widths */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+        <div className="xl:col-span-7">
+          <ExpandableSection
+            className="h-full"
+            icon={AlertTriangle}
+            title="مشتریان در معرض از دست رفتن"
+            count={intel.at_risk.count}
+            badge={
+              <Badge variant="outline" className="gap-1 border-transparent bg-red-500/10 text-red-600 dark:text-red-400">
+                {formatCurrency(intel.at_risk.revenue)} در خطر
+              </Badge>
+            }
+            preview={
+              intel.at_risk.top.length === 0 ? (
+                <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">مشتری در معرض از دست رفتنی یافت نشد.</p>
+              ) : (
+              <div className="space-y-2">
+                {intel.at_risk.top.slice(0, 3).map((r) => (
+                  <div key={r.customer_id} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
+                    <div className="min-w-0 leading-tight">
+                      <p className="text-xs font-medium tabular-nums">{r.customer_id}</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        {formatNumber(r.complaints)} شکایت · {formatNumber(r.orders)} سفارش
+                        {r.days_since != null && <span> · آخرین خرید {formatNumber(r.days_since)} روز پیش</span>}
+                      </p>
                     </div>
-                    <span className="text-xs font-medium tabular-nums">{formatNumber(Math.round(o.rate * 100))}٪</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          }
-          full={
-            <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
-              {intel.offer_effectiveness.map((o) => (
-                <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
-                  <p className="text-xs font-medium">
-                    {o.type}
-                    <span className="mr-1 text-[10px] text-muted-foreground">({formatNumber(o.count)} پیشنهاد)</span>
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <div className="h-2 w-24 overflow-hidden rounded-full bg-muted">
-                      <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${o.rate * 100}%` }} />
+                    <div className="shrink-0 text-left">
+                      <p className="text-xs font-medium tabular-nums">{formatCurrency(r.revenue)}</p>
+                      <span className={cn("inline-block rounded-md px-1.5 py-0.5 text-[10px]", riskChip[levelOf(r.risk_score)] ?? riskChip["متوسط"])}>
+                        {levelOf(r.risk_score)}
+                      </span>
                     </div>
-                    <span className="text-xs font-medium tabular-nums">{formatNumber(Math.round(o.rate * 100))}٪</span>
                   </div>
-                </div>
-              ))}
-            </div>
-          }
-        />
+                ))}
+              </div>
+              )
+            }
+            full={
+              <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
+                {intel.at_risk.top.map((r) => (
+                  <div key={r.customer_id} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
+                    <div className="min-w-0 leading-tight">
+                      <p className="text-xs font-medium tabular-nums">{r.customer_id}</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        {formatNumber(r.complaints)} شکایت · {formatNumber(r.orders)} سفارش
+                        {r.days_since != null && <span> · آخرین خرید {formatNumber(r.days_since)} روز پیش</span>}
+                        {r.bounced > 0 && <span> · {formatNumber(r.bounced)} چک برگشتی</span>}
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-left">
+                      <p className="text-xs font-medium tabular-nums">{formatCurrency(r.revenue)}</p>
+                      <span className={cn("inline-block rounded-md px-1.5 py-0.5 text-[10px]", riskChip[levelOf(r.risk_score)] ?? riskChip["متوسط"])}>
+                        {levelOf(r.risk_score)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            }
+          />
+        </div>
 
-        <ExpandableSection
-          icon={Landmark}
-          title="مطالبات و چک‌های برگشتی"
-          alwaysExpandable
-          preview={
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="rounded-lg border bg-muted/30 p-3 text-center">
-                <p className="text-xl font-semibold tabular-nums">{formatCurrency(intel.collection_risk.overdue)}</p>
-                <p className="mt-1 text-[11px] text-muted-foreground">مطالبات با تأخیر</p>
+        <div className="xl:col-span-5">
+          <ExpandableSection
+            className="h-full"
+            icon={MessageSquareWarning}
+            title="موضوع‌های پرتکرار شکایت"
+            count={intel.complaint_themes.length}
+            preview={
+              intel.complaint_themes.length === 0 ? (
+                <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">شکایتی ثبت نشده است.</p>
+              ) : (
+              <div className="space-y-2.5">
+                {intel.complaint_themes.slice(0, 3).map((t) => (
+                  <div key={t.name} className="flex items-center gap-3">
+                    <span className="w-32 truncate text-xs text-muted-foreground">{t.name}</span>
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                      <div className="h-full rounded-full bg-amber-500/70" style={{ width: `${(t.count / maxTheme) * 100}%` }} />
+                    </div>
+                    <span className="w-10 text-left text-xs font-medium tabular-nums">{formatNumber(t.count)}</span>
+                  </div>
+                ))}
               </div>
-              <div className="rounded-lg border bg-red-500/5 p-3 text-center">
-                <p className="text-xl font-semibold tabular-nums">{formatNumber(intel.collection_risk.bounced)}</p>
-                <p className="mt-1 text-[11px] text-muted-foreground">چک برگشتی</p>
+              )
+            }
+            full={
+              <div className="max-h-80 space-y-2.5 overflow-y-auto scrollbar-thin">
+                {intel.complaint_themes.map((t) => (
+                  <div key={t.name} className="flex items-center gap-3">
+                    <span className="w-40 truncate text-xs text-muted-foreground">{t.name}</span>
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                      <div className="h-full rounded-full bg-amber-500/70" style={{ width: `${(t.count / maxTheme) * 100}%` }} />
+                    </div>
+                    <span className="w-10 text-left text-xs font-medium tabular-nums">{formatNumber(t.count)}</span>
+                  </div>
+                ))}
               </div>
-              <div className="rounded-lg border bg-emerald-500/5 p-3 text-center">
-                <p className="text-xl font-semibold tabular-nums">{formatNumber(intel.winback.count)}</p>
-                <p className="mt-1 text-[11px] text-muted-foreground">مشتری قدیمی ارزشمند</p>
-              </div>
-            </div>
-          }
-          full={
-            <div className="space-y-2.5">
-              <div className="rounded-lg border bg-muted/30 p-3">
-                <p className="text-xs text-muted-foreground">مجموع درآمد قابل بازیابی از مشتریان قدیمی (بیش از یک سال بدون خرید)</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums">{formatCurrency(intel.winback.revenue)}</p>
-              </div>
-              <div className="rounded-lg border bg-muted/30 p-3">
-                <p className="text-xs text-muted-foreground">بیشترین سهم درآمد بر اساس بخش بازار</p>
-                <div className="mt-2 space-y-2">
-                  {intel.segment_share.slice(0, 4).map((s) => (
-                    <div key={s.name} className="flex items-center gap-3">
-                      <span className="w-16 truncate text-xs text-muted-foreground">{s.name}</span>
-                      <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-                        <div className="h-full rounded-full bg-primary/70" style={{ width: `${(s.value / (intel.segment_share[0]?.value || 1)) * 100}%` }} />
+            }
+          />
+        </div>
+
+        <div className="xl:col-span-5">
+          <ExpandableSection
+            className="h-full"
+            icon={Target}
+            title="اثربخشی پیشنهادها"
+            count={intel.offer_effectiveness.length}
+            preview={
+              intel.offer_effectiveness.length === 0 ? (
+                <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">پیشنهادی ثبت نشده است.</p>
+              ) : (
+              <div className="space-y-2.5">
+                {intel.offer_effectiveness.slice(0, 3).map((o) => (
+                  <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
+                    <p className="text-xs font-medium">{o.type}</p>
+                    <div className="flex items-center gap-2">
+                      <div className="h-2 w-20 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${o.rate * 100}%` }} />
                       </div>
-                      <span className="w-16 text-left text-xs font-medium tabular-nums">{formatCurrency(s.value)}</span>
+                      <span className="text-xs font-medium tabular-nums">{formatNumber(Math.round(o.rate * 100))}٪</span>
                     </div>
-                  ))}
+                  </div>
+                ))}
+              </div>
+              )
+            }
+            full={
+              <div className="max-h-80 space-y-2.5 overflow-y-auto scrollbar-thin">
+                {intel.offer_effectiveness.map((o) => (
+                  <div key={o.type} className="flex items-center justify-between gap-3 rounded-lg border bg-muted/30 px-2.5 py-2">
+                    <p className="text-xs font-medium">
+                      {o.type}
+                      <span className="mr-1 text-[10px] text-muted-foreground">({formatNumber(o.count)} پیشنهاد)</span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <div className="h-2 w-20 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${o.rate * 100}%` }} />
+                      </div>
+                      <span className="text-xs font-medium tabular-nums">{formatNumber(Math.round(o.rate * 100))}٪</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            }
+          />
+        </div>
+
+        <div className="xl:col-span-7">
+          <ExpandableSection
+            className="h-full"
+            icon={Landmark}
+            title="مطالبات، چک‌های برگشتی و مشتریان قدیمی"
+            alwaysExpandable
+            preview={
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="rounded-lg border bg-muted/30 p-3 text-center">
+                  <p className="text-xl font-semibold tabular-nums">{formatCurrency(intel.collection_risk.overdue)}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">مطالبات با تأخیر</p>
+                </div>
+                <div className="rounded-lg border bg-red-500/5 p-3 text-center">
+                  <p className="text-xl font-semibold tabular-nums">{formatNumber(intel.collection_risk.bounced)}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">چک برگشتی</p>
+                </div>
+                <div className="rounded-lg border bg-emerald-500/5 p-3 text-center">
+                  <p className="text-xl font-semibold tabular-nums">{formatNumber(intel.winback.count)}</p>
+                  <p className="mt-1 text-[11px] text-muted-foreground">مشتری قدیمی ارزشمند</p>
                 </div>
               </div>
-            </div>
-          }
-        />
+            }
+            full={
+              <div className="space-y-2.5">
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <p className="text-xs text-muted-foreground">مجموع درآمد قابل بازیابی از مشتریان قدیمی (بیش از یک سال بدون خرید)</p>
+                  <p className="mt-1 text-lg font-semibold tabular-nums">{formatCurrency(intel.winback.revenue)}</p>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <p className="mb-2 text-xs text-muted-foreground">بیشترین سهم درآمد بر اساس بخش بازار</p>
+                  <div className="space-y-2">
+                    {intel.segment_share.slice(0, 4).map((s) => (
+                      <div key={s.name} className="flex items-center gap-3">
+                        <span className="w-16 truncate text-xs text-muted-foreground">{s.name}</span>
+                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
+                          <div className="h-full rounded-full bg-primary/70" style={{ width: `${(s.value / (intel.segment_share[0]?.value || 1)) * 100}%` }} />
+                        </div>
+                        <span className="w-16 text-left text-xs font-medium tabular-nums">{formatCurrency(s.value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            }
+          />
+        </div>
       </div>
     </div>
   );

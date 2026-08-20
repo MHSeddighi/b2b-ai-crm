@@ -114,3 +114,57 @@ def test_dashboard_summary_cached_and_reused(monkeypatch):
         assert second["generated"] is False
         assert second["summary"] == first["summary"]
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Persian labels
+# ---------------------------------------------------------------------------
+def test_reason_translator_covers_engine_templates():
+    from backend.crm.labels import translate_reason
+    import re
+    cases = [
+        "2 bounced cheque(s)",
+        "172/259 payments are late",
+        "11 unresolved complaint(s) remain",
+        "54 open development request(s)",
+        "Customer is 1507 days since last purchase vs a normal cycle of 7 days (ratio 215.29)",
+        "Customer responds best to discount offers (18 accepted / 17 rejected)",
+        "Customer responds best to payment_terms offers (3 accepted / 1 rejected)",
+        "Share of wallet is 35% (3 month(s), source: فروش کارشناس، مشتری اظهار)",
+        "Profit margin is 73.0% but cost data covers only 29% of revenue, so it is not reliable",
+        "Purchase decline (-100%) followed the complaint",
+        "Revenue changed +12.5% (40 vs 35 orders)",
+        "Total revenue 153,046,766",
+        "Payment behaviour deteriorating",
+        "Customer is far beyond normal purchase cycle",
+        "No complaints on record",
+        "Insufficient history: no comparable previous period",
+        "Margin moved from 25.0% to 30.0% (change +5.0%)",
+    ]
+    for eng in cases:
+        fa = translate_reason(eng)
+        assert re.search(r"[a-zA-Z]", fa) is None, f"left English: {eng!r} -> {fa!r}"
+        assert fa != eng
+
+
+def test_360_payload_translated_fields_are_persian():
+    import re
+    payload = api_data.customer_360(_any_customer())
+    for sig in payload["riskSignals"]:
+        assert re.search(r"[a-zA-Z]", sig["label"]) is None
+        for reason in sig["reasons"]:
+            assert re.search(r"[a-zA-Z]", reason) is None, reason
+    for act in payload["actions"]:
+        assert re.search(r"[a-zA-Z]", act["name"]) is None, act["name"]
+        assert re.search(r"[a-zA-Z]", act["reason"]) is None, act["reason"]
+        assert re.search(r"[a-zA-Z]", act["next_step"]) is None, act["next_step"]
+    for dim, v in payload["state"].items():
+        assert re.search(r"[a-zA-Z]", v["status"]) is None, v["status"]
+        for reason in v["reasons"]:
+            assert re.search(r"[a-zA-Z]", reason) is None, reason
+
+
+def test_analyses_cached():
+    first = api_data.analyses()
+    second = api_data.analyses()
+    assert first == second

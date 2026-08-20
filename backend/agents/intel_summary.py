@@ -19,58 +19,7 @@ from typing import Any
 from backend.agents.db_agent import _llm_call_async
 from backend.config import settings
 from backend.crm import cache as store
-
-# ---------------------------------------------------------------------------
-# Persian labels (deterministic mapping — never left to the model to guess)
-# ---------------------------------------------------------------------------
-SIGNAL_FA = {
-    "profit": "سودآوری",
-    "purchase_trend": "روند خرید",
-    "payment_behavior": "رفتار پرداخت",
-    "share_of_wallet": "سهم از خرید مشتری",
-    "purchase_cycle": "چرخه خرید",
-    "margin_trend": "روند حاشیه سود",
-    "offer_affinity": "پاسخ به پیشنهادها",
-    "complaint_impact": "اثر شکایات",
-    "dev_request": "درخواست‌های توسعه",
-    "growth_potential": "پتانسیل رشد",
-    "churn_risk": "ریسک از دست دادن مشتری",
-}
-
-STATUS_FA = {
-    "positive": "مثبت",
-    "neutral": "خنثی",
-    "warning": "هشدار",
-    "critical": "بحرانی",
-    "unknown": "نامشخص",
-    "low_confidence": "کم‌اطمینان",
-    "high": "بالا",
-    "medium": "متوسط",
-    "low": "کم",
-    "poor": "ضعیف",
-    "healthy": "سالم",
-    "stable": "پایدار",
-    "declining": "رو به کاهش",
-    "improving": "در حال بهبود",
-}
-
-ACTION_FA = {
-    "RETENTION_CALL": "تماس برای حفظ مشتری",
-    "SERVICE_RECOVERY": "رسیدگی به شکایت‌ها",
-    "ACCOUNT_REVIEW": "بازبینی حساب مشتری",
-    "CROSS_SELL": "فروش محصول‌های مکمل",
-    "UPSELL": "افزایش حجم فروش",
-    "REACTIVATION": "بازگرداندن مشتری از دست‌رفته",
-    "PRICE_REVIEW": "بازبینی قیمت‌گذاری",
-    "DISCOUNT_REDUCTION": "کاهش وابستگی به تخفیف",
-    "PAYMENT_TERMS_REVIEW": "بازبینی شرایط پرداخت",
-    "CREDIT_REVIEW": "بازبینی اعتبار مشتری",
-    "LOYALTY_OFFER": "پیشنهاد وفاداری",
-    "VOLUME_OFFER": "پیشنهاد حجمی",
-    "BUNDLE_OFFER": "پیشنهاد ترکیبی محصول‌ها",
-    "PRODUCT_DEVELOPMENT_FOLLOWUP": "پیگیری درخواست توسعه محصول",
-    "NO_ACTION": "فقط پایش",
-}
+from backend.crm.labels import ACTION_FA, SIGNAL_FA, fa_money, fa_num, fa_pct
 
 _SYSTEM = """تو «خلاصه‌ساز هوشمند» محصول Cust Intel هستی؛ همان دستیار فروش مدیران.
 
@@ -90,48 +39,6 @@ _SYSTEM = """تو «خلاصه‌ساز هوشمند» محصول Cust Intel ه�
   ساده‌سازی‌شده بنویس؛ هیچ اقدام جدیدی اختراع نکن.
 - اعداد را با ارقام فارسی و واحد «تومان» برای پول بنویس.
 """
-
-
-def _fa_num(v: Any) -> str:
-    """Format a number with Persian digits."""
-    if v is None:
-        return "نامشخص"
-    try:
-        fv = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    digits = "۰۱۲۳۴۵۶۷۸۹"
-    groups = []
-    s = f"{fv:,.0f}"
-    if fv != int(fv):
-        s = f"{fv:,.1f}"
-    out = []
-    for ch in s:
-        if ch.isdigit():
-            out.append(digits[int(ch)])
-        else:
-            out.append(ch)
-    return "".join(out)
-
-
-def _fa_money(v: Any) -> str:
-    if v is None:
-        return "نامشخص"
-    try:
-        fv = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    return _fa_num(round(fv)) + " تومان"
-
-
-def _fa_pct(v: Any) -> str:
-    if v is None:
-        return "نامشخص"
-    try:
-        fv = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    return _fa_num(round(fv * 100)) + "٪"
 
 
 def _signal_lines(snapshot: dict[str, Any]) -> list[str]:
@@ -229,18 +136,18 @@ def _customer_prompt(snapshot: dict[str, Any]) -> str:
     lines = [
         f"مشتری: {s['customer_id']}",
         f"بخش بازار: {s['segment']} | وضعیت: {s['status']} | شروع همکاری: {s['relationship_start']} | نماینده فروش: {s['sales_rep']}",
-        f"درآمد کل: {_fa_money(s['revenue'])} | سفارش‌ها: {_fa_num(s['orders'])} | میانگین هر سفارش: {_fa_money(s['avg_order'])} | آخرین خرید: {s['last_purchase']}",
-        f"شکایت‌ها: {_fa_num(s['complaints_count'])} (باز: {_fa_num(s['unresolved_complaints'])})",
+        f"درآمد کل: {fa_money(s['revenue'])} | سفارش‌ها: {fa_num(s['orders'])} | میانگین هر سفارش: {fa_money(s['avg_order'])} | آخرین خرید: {s['last_purchase']}",
+        f"شکایت‌ها: {fa_num(s['complaints_count'])} (باز: {fa_num(s['unresolved_complaints'])})",
     ]
     if s["top_complaints"]:
         lines.append("موضوع‌های پرتکرار شکایت: " + "، ".join(
-            f"{t} ({_fa_num(c)} مورد)" for t, c in s["top_complaints"][:3]))
+            f"{t} ({fa_num(c)} مورد)" for t, c in s["top_complaints"][:3]))
     lines.append(
-        f"تعامل‌ها: {_fa_num(s['interactions_count'])} | درخواست توسعه: {_fa_num(s['dev_count'])} (باز: {_fa_num(s['dev_open'])})")
+        f"تعامل‌ها: {fa_num(s['interactions_count'])} | درخواست توسعه: {fa_num(s['dev_count'])} (باز: {fa_num(s['dev_open'])})")
     lines.append(
-        f"پیشنهادها: {_fa_num(s['offers_count'])} | نرخ پذیرش: {_fa_pct(s['offer_acceptance'])} | بهترین نوع: {s['best_offer_type']}")
+        f"پیشنهادها: {fa_num(s['offers_count'])} | نرخ پذیرش: {fa_pct(s['offer_acceptance'])} | بهترین نوع: {s['best_offer_type']}")
     lines.append(
-        f"پرداخت‌های عقب‌افتاده: {_fa_money(s['overdue_amount'])} | چک برگشتی: {_fa_num(s['bounced_checks'])}")
+        f"پرداخت‌های عقب‌افتاده: {fa_money(s['overdue_amount'])} | چک برگشتی: {fa_num(s['bounced_checks'])}")
     lines.append(f"وضعیت کلی مشتری: {s['risk_level']}")
     lines.append("")
     lines.append("وضعیت ابعاد (به فارسی ساده):")
@@ -255,22 +162,22 @@ def _dashboard_prompt(snapshot: dict[str, Any]) -> str:
     s = snapshot
     lines: list[str] = []
     for k in s["kpis"]:
-        lines.append(f"شاخص {k['label']}: {_fa_num(k['value'])}")
+        lines.append(f"شاخص {k['label']}: {fa_num(k['value'])}")
     at = s["at_risk"]
     lines.append(
-        f"مشتریان در معرض از دست رفتن: {_fa_num(at.get('count', 0))} مشتری با درآمد {_fa_money(at.get('revenue', 0))}")
+        f"مشتریان در معرض از دست رفتن: {fa_num(at.get('count', 0))} مشتری با درآمد {fa_money(at.get('revenue', 0))}")
     if s["complaint_themes"]:
         lines.append("موضوع‌های پرتکرار شکایت: " + "، ".join(
-            f"{t['name']} ({_fa_num(t['count'])} مورد)" for t in s["complaint_themes"][:4]))
+            f"{t['name']} ({fa_num(t['count'])} مورد)" for t in s["complaint_themes"][:4]))
     if s["offer_effectiveness"]:
         lines.append("پذیرش پیشنهادها بر اساس نوع: " + "؛ ".join(
-            f"{o['type']}: {_fa_pct(o['rate'])}" for o in s["offer_effectiveness"][:4]))
+            f"{o['type']}: {fa_pct(o['rate'])}" for o in s["offer_effectiveness"][:4]))
     col = s["collection_risk"]
     lines.append(
-        f"مطالبات عقب‌افتاده: {_fa_money(col.get('overdue', 0))} | چک برگشتی: {_fa_num(col.get('bounced', 0))}")
+        f"مطالبات عقب‌افتاده: {fa_money(col.get('overdue', 0))} | چک برگشتی: {fa_num(col.get('bounced', 0))}")
     wb = s["winback"]
     lines.append(
-        f"مشتریان قدیمی ارزشمند برای بازگرداندن: {_fa_num(wb.get('count', 0))} مشتری با درآمد {_fa_money(wb.get('revenue', 0))}")
+        f"مشتریان قدیمی ارزشمند برای بازگرداندن: {fa_num(wb.get('count', 0))} مشتری با درآمد {fa_money(wb.get('revenue', 0))}")
     return "\n".join(lines)
 
 

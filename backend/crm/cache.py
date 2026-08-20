@@ -20,14 +20,21 @@ from backend.config import settings
 
 _CACHE_ROOT = settings.repo_root / "data" / "cache"
 
+# Bump when the cached payload/summary shape or its producing code changes, so
+# stale entries from older versions are recomputed once after an update.
+SCHEMA_VERSION = "3"
+
 
 def _path(kind: str, key: str) -> Path:
     return _CACHE_ROOT / kind / f"{key}.json"
 
 
 def fingerprint(payload: Any) -> str:
-    """Stable short hash of a JSON-serializable payload."""
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    """Stable short hash of a JSON-serializable payload (version-scoped)."""
+    raw = json.dumps(
+        {"v": SCHEMA_VERSION, "p": payload},
+        ensure_ascii=False, sort_keys=True, default=str,
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 

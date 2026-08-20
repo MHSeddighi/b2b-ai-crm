@@ -407,7 +407,11 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         };
         let tries = 0;
         const tick = async () => {
-          if (stopped || tries > 40) return;
+          if (stopped) return;
+          if (tries > 200) {
+            setPollExhausted(true);
+            return;
+          }
           tries += 1;
           try {
             const res = await fetchCustomer360Summary(customerId);
@@ -425,6 +429,41 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
       .catch(() => setError(true));
     return () => stopPollRef.current();
   }, [customerId]);
+
+  // Manual retry when automatic polling gave up (very long LLM latency).
+  const [pollExhausted, setPollExhausted] = useState(false);
+  useEffect(() => {
+    setPollExhausted(false);
+  }, [customerId]);
+
+  function retrySummary() {
+    setPollExhausted(false);
+    let stopped = false;
+    stopPollRef.current();
+    stopPollRef.current = () => {
+      stopped = true;
+    };
+    let tries = 0;
+    const tick = async () => {
+      if (stopped) return;
+      if (tries > 200) {
+        setPollExhausted(true);
+        return;
+      }
+      tries += 1;
+      try {
+        const res = await fetchCustomer360Summary(customerId);
+        if (res.status === "ready") {
+          setSummary(res);
+          return;
+        }
+      } catch {
+        /* keep polling */
+      }
+      setTimeout(tick, 2500);
+    };
+    tick();
+  }
 
   if (error) {
     return (
@@ -453,17 +492,17 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
     { key: "profitability", label: "سودآوری" },
     { key: "value", label: "ارزش" },
   ];
-  const stateLabel: Record<string, string> = {
-    healthy: "سالم",
-    poor: "ضعیف",
-    high: "بالا",
-    medium: "متوسط",
-    low: "کم",
-    warning: "هشدار",
-    positive: "مثبت",
-    neutral: "خنثی",
-    negative: "منفی",
-    unknown: "نامشخص",
+  // Statuses arrive already translated to Persian; only tone needs mapping.
+  const stateTone: Record<string, string> = {
+    "ضعیف": "bg-red-500",
+    "بحرانی": "bg-red-500",
+    "هشدار": "bg-amber-500",
+    "رو به کاهش": "bg-amber-500",
+    "سالم": "bg-emerald-500",
+    "بالا": "bg-emerald-500",
+    "مثبت": "bg-emerald-500",
+    "در حال بهبود": "bg-emerald-500",
+    "پایدار": "bg-emerald-500",
   };
 
   return (
@@ -516,6 +555,16 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         <CardContent>
           {summaryText ? (
             <SummaryText text={summaryText} />
+          ) : pollExhausted ? (
+            <div className="flex flex-col items-start gap-3">
+              <p className="text-sm text-muted-foreground">
+                آماده‌سازی خلاصه بیشتر از حد انتظار طول کشید. دوباره تلاش کنید.
+              </p>
+              <Button size="sm" onClick={retrySummary}>
+                <Loader2 className="mr-1 h-3.5 w-3.5" />
+                تلاش دوباره
+              </Button>
+            </div>
           ) : (
             <SummaryLoader />
           )}
@@ -524,7 +573,7 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
 
       {/* Risk / Sales / Complaints */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <Card>
+        <Card className="h-full">
           <CardHeader className="pb-2">
             <div className="flex items-center gap-2">
               <Activity className="h-4 w-4 text-muted-foreground" />
@@ -544,16 +593,11 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
               .filter((c) => view.state[c.key] && view.state[c.key].status)
               .map((c) => {
                 const st = view.state[c.key];
-                const tone =
-                  st.status === "poor" || st.status === "high" || st.status === "warning"
-                    ? riskTone["متوسط"]
-                    : st.status === "healthy" || st.status === "low" || st.status === "positive"
-                      ? "bg-emerald-500"
-                      : "bg-muted-foreground";
+                const tone = stateTone[st.status] ?? "bg-muted-foreground";
                 return (
                   <span key={c.key} className="mt-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
                     <span className={cn("h-1.5 w-1.5 rounded-full", tone)} />
-                    {c.label}: {stateLabel[st.status] ?? st.status}
+                    {c.label}: {st.status}
                   </span>
                 );
               })}
@@ -565,7 +609,7 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="h-full">
           <CardHeader className="pb-2">
             <div className="flex items-center gap-2">
               <ShoppingCart className="h-4 w-4 text-muted-foreground" />
@@ -621,127 +665,153 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         </Card>
       </div>
 
-      {/* Actions */}
-      <ExpandableSection
-        icon={Lightbulb}
-        title="اقدام پیشنهادی"
-        count={view.actions.length}
-        preview={<div className="space-y-2">{view.actions.slice(0, 2).map((a) => <ActionItem key={a.id} action={a} />)}</div>}
-        full={<div className="space-y-2">{view.actions.map((a) => <ActionItem key={a.id} action={a} />)}</div>}
-      />
-
-      {/* Sections grid */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <ExpandableSection
-          icon={Activity}
-          title="نشانه‌های وضعیت مشتری"
-          count={view.riskSignals.length}
-          preview={<div className="space-y-3">{view.riskSignals.slice(0, 3).map((s) => <SignalRow key={s.label + s.detail} signal={s} />)}</div>}
-          full={<div className="max-h-80 space-y-3 overflow-y-auto scrollbar-thin">{view.riskSignals.map((s) => <SignalRow key={s.label + s.detail} signal={s} />)}</div>}
-        />
-
-        <ExpandableSection
-          icon={MessageSquareWarning}
-          title="شکایات و عوامل آن"
-          count={view.complaintList.length}
-          preview={<ListBody items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است." />}
-          full={<FullList items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است." />}
-        />
-
-        <ExpandableSection
-          icon={Handshake}
-          title="تعاملات و پیگیری‌ها"
-          count={view.interactionsCount}
-          preview={<ListBody items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است." />}
-          full={<FullList items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است." />}
-        />
-
-        <ExpandableSection
-          icon={Receipt}
-          title="سفارش‌ها و تراکنش‌ها"
-          count={view.transactions.length}
-          preview={<ListBody items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است." />}
-          full={<FullList items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است." />}
-        />
-
-        <ExpandableSection
-          icon={ClipboardList}
-          title="درخواست‌های توسعه محصول"
-          count={view.devCount}
-          badge={
-            view.devOpen > 0 ? (
-              <Badge variant="outline" className="gap-1 border-transparent bg-amber-500/10 text-amber-600 dark:text-amber-400">
-                {formatNumber(view.devOpen)} باز
-              </Badge>
-            ) : undefined
-          }
-          preview={<ListBody items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است." />}
-          full={<FullList items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است." />}
-        />
-
-        <ExpandableSection
-          icon={Tags}
-          title="پیشنهادهای قیمتی"
-          count={view.offers.length}
-          badge={
-            view.offerAcceptance != null ? (
-              <Badge variant="outline" className="gap-1 border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
-                پذیرش {formatNumber(Math.round(view.offerAcceptance * 100))}٪
-              </Badge>
-            ) : undefined
-          }
-          preview={<ListBody items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است." />}
-          full={<FullList items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است." />}
-        />
-
-        <ExpandableSection
-          icon={Wallet}
-          title="وصول و پرداخت‌ها"
-          count={view.collectionsCount}
-          badge={
-            view.bouncedChecks > 0 ? (
-              <Badge variant="outline" className="gap-1 border-transparent bg-red-500/10 text-red-600 dark:text-red-400">
-                {formatNumber(view.bouncedChecks)} چک برگشتی
-              </Badge>
-            ) : undefined
-          }
-          preview={<ListBody items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است." />}
-          full={<FullList items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است." />}
-        />
-      </div>
-
-      {/* Market signals + customer record */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {view.marketSignals.length > 0 && (
+      {/* Sections — varied responsive widths (dashboard/analyses style) */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+        <div className="xl:col-span-5">
           <ExpandableSection
-            icon={MailQuestion}
-            title="نشانه‌های بازار"
-            count={view.marketSignals.length}
-            preview={<ListBody items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است." />}
-            full={<FullList items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است." />}
+            className="h-full"
+            icon={Activity}
+            title="نشانه‌های وضعیت مشتری"
+            count={view.riskSignals.length}
+            preview={<div className="space-y-3">{view.riskSignals.slice(0, 3).map((s) => <SignalRow key={s.label + s.detail} signal={s} />)}</div>}
+            full={<div className="max-h-80 space-y-3 overflow-y-auto scrollbar-thin">{view.riskSignals.map((s) => <SignalRow key={s.label + s.detail} signal={s} />)}</div>}
           />
+        </div>
+
+        <div className="xl:col-span-7">
+          <ExpandableSection
+            className="h-full"
+            icon={Lightbulb}
+            title="اقدام پیشنهادی"
+            count={view.actions.length}
+            preview={<div className="space-y-2">{view.actions.slice(0, 2).map((a) => <ActionItem key={a.id} action={a} />)}</div>}
+            full={<div className="space-y-2">{view.actions.map((a) => <ActionItem key={a.id} action={a} />)}</div>}
+          />
+        </div>
+
+        <div className="xl:col-span-7">
+          <ExpandableSection
+            className="h-full"
+            icon={MessageSquareWarning}
+            title="شکایات و عوامل آن"
+            count={view.complaintList.length}
+            preview={<ListBody items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است." />}
+            full={<FullList items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است." />}
+          />
+        </div>
+
+        <div className="xl:col-span-5">
+          <ExpandableSection
+            className="h-full"
+            icon={Handshake}
+            title="تعاملات و پیگیری‌ها"
+            count={view.interactionsCount}
+            preview={<ListBody items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است." />}
+            full={<FullList items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است." />}
+          />
+        </div>
+
+        <div className="xl:col-span-7">
+          <ExpandableSection
+            className="h-full"
+            icon={Receipt}
+            title="سفارش‌ها و تراکنش‌ها"
+            count={view.transactions.length}
+            preview={<ListBody items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است." />}
+            full={<FullList items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است." />}
+          />
+        </div>
+
+        <div className="xl:col-span-5">
+          <ExpandableSection
+            className="h-full"
+            icon={ClipboardList}
+            title="درخواست‌های توسعه محصول"
+            count={view.devCount}
+            badge={
+              view.devOpen > 0 ? (
+                <Badge variant="outline" className="gap-1 border-transparent bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                  {formatNumber(view.devOpen)} باز
+                </Badge>
+              ) : undefined
+            }
+            preview={<ListBody items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است." />}
+            full={<FullList items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است." />}
+          />
+        </div>
+
+        <div className="xl:col-span-5">
+          <ExpandableSection
+            className="h-full"
+            icon={Tags}
+            title="پیشنهادهای قیمتی"
+            count={view.offers.length}
+            badge={
+              view.offerAcceptance != null ? (
+                <Badge variant="outline" className="gap-1 border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                  پذیرش {formatNumber(Math.round(view.offerAcceptance * 100))}٪
+                </Badge>
+              ) : undefined
+            }
+            preview={<ListBody items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است." />}
+            full={<FullList items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است." />}
+          />
+        </div>
+
+        <div className="xl:col-span-7">
+          <ExpandableSection
+            className="h-full"
+            icon={Wallet}
+            title="وصول و پرداخت‌ها"
+            count={view.collectionsCount}
+            badge={
+              view.bouncedChecks > 0 ? (
+                <Badge variant="outline" className="gap-1 border-transparent bg-red-500/10 text-red-600 dark:text-red-400">
+                  {formatNumber(view.bouncedChecks)} چک برگشتی
+                </Badge>
+              ) : undefined
+            }
+            preview={<ListBody items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است." />}
+            full={<FullList items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است." />}
+          />
+        </div>
+
+        {view.marketSignals.length > 0 && (
+          <div className="xl:col-span-5">
+            <ExpandableSection
+              className="h-full"
+              icon={MailQuestion}
+              title="نشانه‌های بازار"
+              count={view.marketSignals.length}
+              preview={<ListBody items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است." />}
+              full={<FullList items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است." />}
+            />
+          </div>
         )}
 
-        <ExpandableSection
-          icon={FileText}
-          title="مشخصات مشتری"
-          alwaysExpandable
-          preview={
-            <div className="space-y-2.5">
-              <MetaRow label="بخش بازار" value={String(view.customer["Customer_Segment"] ?? "—")} />
-              <MetaRow label="وضعیت" value={String(view.customer["Customer_Status"] ?? "—")} />
-              <MetaRow label="نماینده فروش" value={String(view.customer["Sales_Rep_ID"] ?? "—")} />
-              <MetaRow label="شروع همکاری" value={formatDate(String(view.customer["Relationship_Start_Date"] ?? ""))} />
-            </div>
-          }
-          full={
-            <div className="max-h-96 space-y-2.5 overflow-y-auto scrollbar-thin">
-              {Object.entries(view.customer).map(([k, v]) => (
-                <MetaRow key={k} label={k} value={v == null ? "—" : String(v)} />
-              ))}
-            </div>
-          }
-        />
+        <div className="xl:col-span-7">
+          <ExpandableSection
+            className="h-full"
+            icon={FileText}
+            title="مشخصات مشتری"
+            alwaysExpandable
+            preview={
+              <div className="space-y-2.5">
+                <MetaRow label="بخش بازار" value={String(view.customer["Customer_Segment"] ?? "—")} />
+                <MetaRow label="وضعیت" value={String(view.customer["Customer_Status"] ?? "—")} />
+                <MetaRow label="نماینده فروش" value={String(view.customer["Sales_Rep_ID"] ?? "—")} />
+                <MetaRow label="شروع همکاری" value={formatDate(String(view.customer["Relationship_Start_Date"] ?? ""))} />
+              </div>
+            }
+            full={
+              <div className="max-h-96 space-y-2.5 overflow-y-auto scrollbar-thin">
+                {Object.entries(view.customer).map(([k, v]) => (
+                  <MetaRow key={k} label={k} value={v == null ? "—" : String(v)} />
+                ))}
+              </div>
+            }
+          />
+        </div>
       </div>
     </div>
   );

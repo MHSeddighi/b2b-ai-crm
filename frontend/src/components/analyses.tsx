@@ -151,9 +151,11 @@ export function Analyses() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         {/* At-risk accounts */}
+        <div className="xl:col-span-7">
         <ExpandableSection
+          className="h-full"
           icon={AlertTriangle}
           title="نمای کلی حساب‌های پرریسک"
           count={data.atRisk.length}
@@ -166,8 +168,10 @@ export function Analyses() {
           full={<AtRiskTable rows={data.atRisk} preview={false} />}
         />
 
-        {/* Churn factors */}
+        </div>
+        <div className="xl:col-span-5">
         <ExpandableSection
+          className="h-full"
           icon={TrendingDown}
           title="عوامل ریزش"
           alwaysExpandable
@@ -223,8 +227,10 @@ export function Analyses() {
           }
         />
 
-        {/* Complaint themes */}
+        </div>
+        <div className="xl:col-span-5">
         <ExpandableSection
+          className="h-full"
           icon={MessageSquareWarning}
           title="مضامین شکایات"
           count={data.complaintThemes.length}
@@ -234,6 +240,9 @@ export function Analyses() {
             </Badge>
           }
           preview={
+            data.complaintThemes.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">شکایتی ثبت نشده است.</p>
+            ) : (
             <div className="space-y-2">
               {data.complaintThemes.slice(0, 4).map((t) => (
                 <div key={t.name} className="flex items-center gap-3">
@@ -245,6 +254,7 @@ export function Analyses() {
                 </div>
               ))}
             </div>
+            )
           }
           full={
             <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
@@ -261,8 +271,10 @@ export function Analyses() {
           }
         />
 
-        {/* Revenue concentration */}
+        </div>
+        <div className="xl:col-span-7">
         <ExpandableSection
+          className="h-full"
           icon={FileText}
           title="تمرکز درآمد"
           count={data.revenueConcentration.length}
@@ -272,6 +284,9 @@ export function Analyses() {
             </Badge>
           }
           preview={
+            data.revenueConcentration.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">داده‌ای موجود نیست.</p>
+            ) : (
             <div className="space-y-2">
               {data.revenueConcentration.slice(0, 3).map((s) => (
                 <div key={s.name} className="flex items-center gap-3">
@@ -283,6 +298,7 @@ export function Analyses() {
                 </div>
               ))}
             </div>
+            )
           }
           full={
             <div className="max-h-80 space-y-2 overflow-y-auto scrollbar-thin">
@@ -299,6 +315,7 @@ export function Analyses() {
             </div>
           }
         />
+        </div>
       </div>
 
       {/* Note */}

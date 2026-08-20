@@ -293,8 +293,43 @@ def _income_recommendations(con: duckdb.DuckDBPyConnection) -> list[dict[str, An
     return recs
 
 
+def _global_fingerprint(con: duckdb.DuckDBPyConnection) -> str:
+    """Cheap portfolio data fingerprint: counts + newest dates of the main
+    tables. Used to cache the analyses/dashboard-intelligence payloads so
+    repeat visits read instantly and caches invalidate on data change."""
+    from backend.crm import cache as store
+    row = con.execute("""
+        SELECT
+          (SELECT COUNT(*) FROM customers),
+          (SELECT COUNT(*) FROM sales),
+          (SELECT COUNT(*) FROM complaints),
+          (SELECT COUNT(*) FROM crm_interactions),
+          (SELECT COUNT(*) FROM offers),
+          (SELECT COUNT(*) FROM collections),
+          (SELECT COUNT(*) FROM dev_requests),
+          (SELECT COALESCE(MAX("تاریخ"),'') FROM sales),
+          (SELECT COALESCE(MAX(Created_At),'') FROM complaints),
+          (SELECT COALESCE(MAX(Event_Time),'') FROM crm_interactions)
+    """).fetchone()
+    return store.fingerprint(row)
+
+
 def analyses() -> dict[str, Any]:
-    """Real, computed payloads for the Analyses page (no LLM involved)."""
+    """Real, computed payloads for the Analyses page (no LLM involved).
+
+    Cached under the global data fingerprint: first visit computes, later
+    visits read instantly until the underlying data changes."""
+    from backend.crm import cache as store
+    con = _connect()
+    try:
+        fp = _global_fingerprint(con)
+    finally:
+        con.close()
+    return store.cached("analyses", "overview",
+                        _analyses_compute, fp)
+
+
+def _analyses_compute() -> dict[str, Any]:
     con = _connect()
     try:
         ref = date_ref()
@@ -453,22 +488,6 @@ def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> list[str]:
     return [d[0] for d in con.execute(f"DESCRIBE {table}").fetchall()]
 
 
-def _signal_fa(sig_id: str) -> str:
-    return {
-        "profit": "سودآوری",
-        "purchase_trend": "روند خرید",
-        "payment_behavior": "رفتار پرداخت",
-        "share_of_wallet": "سهم از خرید مشتری",
-        "purchase_cycle": "چرخه خرید",
-        "margin_trend": "روند حاشیه سود",
-        "offer_affinity": "پاسخ به پیشنهادها",
-        "complaint_impact": "اثر شکایات",
-        "dev_request": "درخواست‌های توسعه",
-        "growth_potential": "پتانسیل رشد",
-        "churn_risk": "ریسک از دست دادن مشتری",
-    }.get(sig_id, sig_id)
-
-
 def _signal_tone(status: str) -> str:
     return {
         "critical": "negative",
@@ -531,7 +550,11 @@ def _customer_fingerprint(con: duckdb.DuckDBPyConnection,
 def customer_360(customer_id: str) -> dict[str, Any] | None:
     """Full customer-360 payload (all dataset sections + cached LLM summary).
     The deterministic part is cached per customer under a data fingerprint, so
-    the first visit computes it and every later visit reads it instantly."""
+    the first visit computes it and every later visit reads it instantly. The
+    LLM summary status is NEVER cached inside the payload: it is overlaid live
+    from the summary cache (and re-validated against the current payload
+    fingerprint), so a freshly generated summary is visible immediately and a
+    stale one is correctly reported as not-ready."""
     from backend.crm import cache as store
     con = _connect()
     try:
@@ -543,10 +566,23 @@ def customer_360(customer_id: str) -> dict[str, Any] | None:
     finally:
         con.close()
 
-    def compute() -> dict[str, Any]:
-        return _customer_360_compute(customer_id)
+    payload = store.cached("customer360_data", customer_id,
+                           lambda: _customer_360_compute(customer_id), fp)
+    if payload is None or not payload.get("customer"):
+        return None
 
-    return store.cached("customer360_data", customer_id, compute, fp)
+    # Live summary overlay (fingerprint-validated against THIS payload).
+    from backend.agents import intel_summary
+    snapshot = intel_summary._customer_snapshot(payload)
+    sum_fp = store.fingerprint(snapshot)
+    entry = store.load("customer360", customer_id)
+    if entry is not None and entry.get("fingerprint") == sum_fp:
+        payload["summary"] = entry["value"]
+        payload["summaryReady"] = True
+    else:
+        payload["summary"] = None
+        payload["summaryReady"] = False
+    return payload
 
 
 def _customer_360_compute(customer_id: str) -> dict[str, Any]:
@@ -596,15 +632,19 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
         avg_order_value = round(revenue / orders) if orders else 0
 
         # ---- deterministic engine: signals / state / reasons / actions ----
+        from backend.crm.labels import (
+            SIGNAL_FA, action_name, action_next_step, status_fa,
+            translate_reason, translate_reasons,
+        )
         from backend.crm.service import service
         ci = service.get_intelligence(customer_id)
         engine_signals = [
             {
                 "id": sig_id,
-                "label": _signal_fa(sig_id),
+                "label": SIGNAL_FA.get(sig_id, sig_id),
                 "tone": _signal_tone(s.status),
                 "detail": _signal_detail(sig_id, s.status),
-                "reasons": s.reasons[:2],
+                "reasons": translate_reasons(s.reasons[:2]),
             }
             for sig_id, s in ci.signals.items()
             if s is not None
@@ -614,10 +654,10 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
         actions = [
             {
                 "id": a.action_id,
-                "name": a.name,
-                "reason": a.reason,
-                "evidence": a.evidence[:2],
-                "next_step": a.suggested_next_step,
+                "name": action_name(a.action_id, a.name),
+                "reason": translate_reason(a.reason),
+                "evidence": translate_reasons(a.evidence[:2]),
+                "next_step": action_next_step(a.action_id, a.suggested_next_step),
             }
             for a in ci.next_best_actions[:6]
         ]
@@ -627,8 +667,8 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
                         "relationship_health", "profitability", "payment_risk"):
                 d = getattr(ci.state, dim)
                 state_dims[dim] = {
-                    "status": d.status,
-                    "reasons": d.reasons[:2],
+                    "status": status_fa(d.status),
+                    "reasons": translate_reasons(d.reasons[:2]),
                 }
 
         # ---- list sections (minimal previews served; UI expands) ----
@@ -780,14 +820,9 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
             WHERE Customer_ID = ? AND "چک برگشتی" = 'بله'
         """, [customer_id]).fetchone()[0] or 0
 
-        # ---- cached LLM summary (fast path when already generated) ----
-        from backend.crm import cache as store
-        summary_entry = store.load("customer360", customer_id)
+        # Summary state is overlaid live by customer_360(), never cached here.
         summary = None
         summary_ready = False
-        if summary_entry is not None:
-            summary = summary_entry["value"]
-            summary_ready = True
 
         return {
             "customer": cust,
