@@ -12,12 +12,13 @@ interface SectionCardProps {
   badge?: ReactNode;
   children: ReactNode;
   className?: string;
-  /** Max height of the scrollable body (default max-h-80). */
-  scrollHeight?: string;
+  /** Minimum height of the scrollable body (default min-h-56). */
+  minHeight?: string;
 }
 
-/** A section card whose body always shows every item inside a scroll area —
- * no "show more" toggles; the scrollbar follows the design system. */
+/** A section card whose body always shows every item inside a scroll area
+ * that fills the remaining card space — no "show more" toggles; the scrollbar
+ * follows the design system. */
 export function SectionCard({
   icon: Icon,
   title,
@@ -25,7 +26,7 @@ export function SectionCard({
   badge,
   children,
   className,
-  scrollHeight = "max-h-80",
+  minHeight = "min-h-56",
 }: SectionCardProps) {
   return (
     <Card className={cn("flex h-full flex-col animate-fade-in-up", className)}>
@@ -41,8 +42,8 @@ export function SectionCard({
           {badge && <span className="mr-auto">{badge}</span>}
         </div>
       </CardHeader>
-      <CardContent className="min-h-0 flex-1">
-        <div className={cn("overflow-y-auto scrollbar-thin", scrollHeight)}>{children}</div>
+      <CardContent className="flex min-h-0 flex-1 flex-col">
+        <div className={cn("min-h-0 flex-1 overflow-y-auto scrollbar-thin", minHeight)}>{children}</div>
       </CardContent>
     </Card>
   );

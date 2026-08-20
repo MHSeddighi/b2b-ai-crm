@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { SectionCard } from "@/components/section-card";
 import { fetchAnalyses, type AnalysesData, type IncomeRecommendation } from "@/lib/api";
-import { formatCurrency, formatNumber, formatDate, cn } from "@/lib/utils";
+import { formatCurrency, formatNumber, formatDate, withDot, cn } from "@/lib/utils";
 
 const riskChip: Record<string, string> = {
   زیاد: "bg-red-500/10 text-red-600 dark:text-red-400",
@@ -138,7 +138,7 @@ export function Analyses() {
       <div className="flex flex-col gap-1 pt-4">
         <h1 className="text-2xl font-semibold tracking-tight">تحلیل‌ها</h1>
         <p className="text-sm text-muted-foreground">
-          تحلیل‌های محاسبه‌شده از داده‌های واقعی مشتریان
+          {withDot("تحلیل‌های محاسبه‌شده از داده‌های واقعی مشتریان")}
         </p>
       </div>
 
@@ -172,7 +172,6 @@ export function Analyses() {
                 ریسک
               </Badge>
             }
-            scrollHeight="max-h-96"
           >
             <AtRiskTable rows={data.atRisk} />
           </SectionCard>
@@ -188,7 +187,6 @@ export function Analyses() {
                 ریزش
               </Badge>
             }
-            scrollHeight="max-h-96"
           >
             <div className="space-y-3">
               <div className="rounded-lg border bg-muted/30 p-3 text-xs leading-relaxed text-muted-foreground">
@@ -227,10 +225,9 @@ export function Analyses() {
                 شکایات
               </Badge>
             }
-            scrollHeight="max-h-96"
           >
             {data.complaintThemes.length === 0 ? (
-              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">شکایتی ثبت نشده است</p>
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("شکایتی ثبت نشده است")}</p>
             ) : (
               <div className="space-y-2.5">
                 {data.complaintThemes.map((t) => (
@@ -258,10 +255,9 @@ export function Analyses() {
                 ریسک
               </Badge>
             }
-            scrollHeight="max-h-96"
           >
             {data.revenueConcentration.length === 0 ? (
-              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">داده‌ای موجود نیست</p>
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("داده‌ای موجود نیست")}</p>
             ) : (
               <div className="space-y-2.5">
                 {data.revenueConcentration.map((s) => (
@@ -290,7 +286,7 @@ export function Analyses() {
         </CardHeader>
         <CardContent>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            همه‌ی این تحلیل‌ها به‌صورت خودکار از داده‌های واقعی سامانه محاسبه شده‌اند و هر بار که داده‌ها به‌روزرسانی شوند، دوباره محاسبه می‌شوند. برای بررسی جزئیات هر مشتری، به صفحه «مشتریان» بروید
+            همه‌ی این تحلیل‌ها به‌صورت خودکار از داده‌های واقعی سامانه محاسبه شده‌اند و هر بار که داده‌ها به‌روزرسانی شوند، دوباره محاسبه می‌شوند. برای بررسی جزئیات هر مشتری، به صفحه «مشتریان» بروید.
           </p>
         </CardContent>
       </Card>

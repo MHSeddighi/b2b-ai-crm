@@ -90,10 +90,23 @@ async def analyses() -> dict[str, Any]:
 
 @app.get("/api/dashboard/intelligence")
 async def dashboard_intelligence(refresh: bool = False) -> dict[str, Any]:
-    """LLM portfolio summary for the dashboard (cached; refresh=1 regenerates)."""
+    """LLM portfolio summary for the dashboard.
+
+    Plain reads are cheap cache lookups keyed by the global data fingerprint
+    (ready / generating / not_ready — never triggers generation). ``refresh=1``
+    regenerates on demand and waits for completion (no client polling loop).
+    """
     from backend.agents import intel_summary
+    from backend.crm import data as crm_data
+    con = crm_data.connect()
+    try:
+        fp = crm_data.global_fingerprint(con)
+    finally:
+        con.close()
+    if not refresh:
+        return await intel_summary.summary_status("dashboard", "overview", fp)
     det = api_data.dashboard()
-    return await intel_summary.dashboard_summary(det, refresh=refresh)
+    return await intel_summary.dashboard_summary(det, refresh=True, fp=fp)
 
 
 @app.get("/api/customers")

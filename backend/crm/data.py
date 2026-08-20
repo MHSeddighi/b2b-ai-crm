@@ -84,3 +84,25 @@ def pct_change(current: float | None, previous: float | None) -> float | None:
     if current is None or previous is None or previous == 0:
         return None
     return (current - previous) / previous
+
+
+def global_fingerprint(con: duckdb.DuckDBPyConnection) -> str:
+    """Cheap portfolio data fingerprint: row counts + newest dates of the main
+    tables. Used to cache portfolio-level computations (analyses, dashboard
+    intelligence, at-risk ranking) so repeat visits read instantly and the
+    cache invalidates automatically when the underlying data changes."""
+    from backend.crm import cache as store
+    row = con.execute("""
+        SELECT
+          (SELECT COUNT(*) FROM customers),
+          (SELECT COUNT(*) FROM sales),
+          (SELECT COUNT(*) FROM complaints),
+          (SELECT COUNT(*) FROM crm_interactions),
+          (SELECT COUNT(*) FROM offers),
+          (SELECT COUNT(*) FROM collections),
+          (SELECT COUNT(*) FROM dev_requests),
+          (SELECT COALESCE(MAX("تاریخ"),'') FROM sales),
+          (SELECT COALESCE(MAX(Created_At),'') FROM complaints),
+          (SELECT COALESCE(MAX(Event_Time),'') FROM crm_interactions)
+    """).fetchone()
+    return store.fingerprint(row)

@@ -116,10 +116,50 @@ def test_dashboard_summary_cached_and_reused(monkeypatch):
         assert not_ready["status"] == "not_ready"
         first = await intel_summary.dashboard_summary(det, refresh=True)
         assert first["status"] == "ready"
-        second = await intel_summary.dashboard_summary(det)
+        # A FRESH payload must produce the same cache key (ties in ORDER BY are
+        # broken deterministically, so the fingerprint never drifts).
+        det2 = api_data.dashboard()
+        second = await intel_summary.dashboard_summary(det2)
+        assert second["status"] == "ready"
         assert second["generated"] is False
         assert second["summary"] == first["summary"]
     asyncio.run(run())
+
+
+def test_customer_summary_fingerprint_stable_across_fresh_payloads(monkeypatch):
+    async def fake_generate_llm(kind, prompt):
+        return "وضعیت کلی: مشتری نیازمند توجه است."
+    monkeypatch.setattr(intel_summary, "_generate_llm", fake_generate_llm)
+
+    cid = _any_customer()
+    for kind, key in (("customer360", cid), ("customer360_data", cid)):
+        p = store._path(kind, key)
+        if p.exists():
+            p.unlink()
+
+    async def run():
+        p1 = api_data.customer_360(cid)
+        first = await intel_summary.customer_summary(p1, refresh=True)
+        assert first["status"] == "ready"
+        p2 = api_data.customer_360(cid)  # fresh payload, same data
+        second = await intel_summary.customer_summary(p2)
+        assert second["status"] == "ready"
+        assert second["generated"] is False
+        assert second["summary"] == first["summary"]
+    asyncio.run(run())
+
+
+def test_engine_at_risk_is_cached_and_ranked():
+    from backend.crm.at_risk import engine_at_risk
+    rows1 = engine_at_risk(10)
+    rows2 = engine_at_risk(10)
+    assert rows1 == rows2, "engine at-risk must be cached and deterministic"
+    assert rows1, "expected at least one ranked customer"
+    scores = [r["risk_score"] for r in rows1]
+    assert scores == sorted(scores, reverse=True), "must be sorted by risk desc"
+    for r in rows1:
+        assert r["risk_level"] in ("زیاد", "متوسط", "کم")
+        assert r["customer_id"]
 
 
 # ---------------------------------------------------------------------------

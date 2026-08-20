@@ -188,33 +188,48 @@ _COMPUTING: set[str] = set()
 _GUARD_LOCK = asyncio.Lock()
 
 
-async def _generate(kind: str, key: str, snapshot: dict[str, Any],
+async def _generate(kind: str, key: str, context: dict[str, Any],
                     prompt_builder, fp: str, refresh: bool = False) -> dict[str, Any]:
     """Return ``{"status": "ready", "summary": ..., "generated": bool}``.
 
-    Cached reads are instant and never trigger regeneration. With
-    ``refresh=True`` the cache is bypassed and the summary is recomputed (an
-    in-flight computation for the same key returns ``{"status": "generating"}``
-    so the caller can poll)."""
+    Without ``refresh`` this is a pure cache read: ready when the cached
+    fingerprint matches, otherwise ``generating`` (a computation is in flight)
+    or ``not_ready`` — it NEVER triggers generation. With ``refresh=True`` it
+    regenerates on demand: if another computation is already in flight for the
+    same key, it waits for that computation to finish and reuses its result
+    (no duplicate LLM calls, no client polling loop)."""
     if not refresh:
+        return await summary_status(kind, key, fp)
+
+    while True:
         entry = store.load(kind, key)
         if entry is not None and entry.get("fingerprint") == fp:
             return {"status": "ready", "summary": entry["value"], "generated": False}
-        # Nothing cached and no explicit refresh: report not-ready without
-        # triggering any LLM work (regeneration is a deliberate user action).
-        return {"status": "not_ready", "summary": None, "generated": False}
+        async with _GUARD_LOCK:
+            if key not in _COMPUTING:
+                _COMPUTING.add(key)
+                break
+        await asyncio.sleep(0.4)
 
-    async with _GUARD_LOCK:
-        if key in _COMPUTING:
-            return {"status": "generating", "summary": None, "generated": False}
-        _COMPUTING.add(key)
     try:
-        summary = await _generate_llm(kind, prompt_builder(snapshot))
+        summary = await _generate_llm(kind, prompt_builder(context))
         store.save(kind, key, summary, fp)
         return {"status": "ready", "summary": summary, "generated": True}
     finally:
         async with _GUARD_LOCK:
             _COMPUTING.discard(key)
+
+
+async def summary_status(kind: str, key: str, fp: str) -> dict[str, Any]:
+    """Pure cache-status read: ready / generating / not_ready. No generation."""
+    entry = store.load(kind, key)
+    if entry is not None and entry.get("fingerprint") == fp:
+        return {"status": "ready", "summary": entry["value"], "generated": False}
+    async with _GUARD_LOCK:
+        in_flight = key in _COMPUTING
+    if in_flight:
+        return {"status": "generating", "summary": None, "generated": False}
+    return {"status": "not_ready", "summary": None, "generated": False}
 
 
 async def _generate_llm(kind: str, user_prompt: str) -> str:
@@ -253,9 +268,15 @@ async def customer_summary(payload: dict[str, Any],
 
 
 async def dashboard_summary(det: dict[str, Any],
-                            refresh: bool = False) -> dict[str, Any]:
-    """LLM portfolio summary for the dashboard (cached by data fingerprint)."""
+                            refresh: bool = False,
+                            fp: str | None = None) -> dict[str, Any]:
+    """LLM portfolio summary for the dashboard.
+
+    ``fp`` lets the caller use a cheap portfolio fingerprint (counts + newest
+    dates) as the cache key, so plain reads never need to rebuild the full
+    dashboard payload. When omitted, the snapshot fingerprint is used."""
     snapshot = _dashboard_snapshot(det)
-    fp = store.fingerprint(snapshot)
+    if fp is None:
+        fp = store.fingerprint(snapshot)
     return await _generate("dashboard", "overview", snapshot,
                            _dashboard_prompt, fp, refresh=refresh)

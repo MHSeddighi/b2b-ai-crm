@@ -46,67 +46,33 @@ def get_customer_action_plan(customer_id: str) -> str:
 
 
 def top_at_risk_customers(limit: int = 10) -> str:
-    """Rank customers by churn-risk and return the top ``limit``.
+    """Rank customers by their REAL churn-risk signal and return the top
+    ``limit``.
 
-    Computed deterministically in a single SQL pass over the same signals the
-    deterministic engine uses: complaint volume, purchase recency (days since
-    the last purchase), order volume, and bounced checks. The LLM must NOT
-    recompute or alter these scores. The result includes richer customer
-    context (segment, status, revenue, days since last purchase) so the answer
-    can be grounded in plain business facts, not just a score.
+    For every customer the deterministic engine computes the base signals the
+    churn-risk signal consumes (purchase trend/cycle, complaint impact, payment
+    behaviour, share of wallet) and derives the churn-risk score — no heuristic
+    SQL, no LLM involvement. The ranking is cached under the global data
+    fingerprint, so repeat calls are instant until the data changes. Result
+    columns: Customer_ID, Customer_Segment, Customer_Status, complaints,
+    orders, revenue, last_purchase, days_since_last_purchase, bounced,
+    risk_score, risk_level.
     """
+    from backend.crm.at_risk import engine_at_risk
     limit = max(1, min(int(limit or 10), 50))
-    con = data.connect()
-    try:
-        ref = data.reference_date(con)
-        ref_lit = f"DATE '{ref.isoformat()}'"
-        sql = f"""
-        WITH agg AS (
-          SELECT
-            c.Customer_ID,
-            c.Customer_Segment,
-            c.Customer_Status,
-            c.Credit_Limit,
-            c.Payment_Terms_Days,
-            (SELECT COUNT(*) FROM complaints co
-              WHERE co.Customer_ID = c.Customer_ID) AS complaints,
-            (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
-              WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
-            (SELECT COUNT(DISTINCT s."شماره فاکتور") FROM sales s
-              WHERE s.Customer_ID = c.Customer_ID) AS orders,
-            (SELECT COALESCE(SUM(s."مبلغ کل"), 0) FROM sales s
-              WHERE s.Customer_ID = c.Customer_ID) AS revenue,
-            (SELECT COUNT(*) FROM collections col
-              WHERE col.Customer_ID = c.Customer_ID
-                AND col."چک برگشتی" = 'بله') AS bounced
-          FROM customers c
-        )
-        SELECT
-          Customer_ID,
-          Customer_Segment,
-          Customer_Status,
-          complaints,
-          orders,
-          revenue,
-          last_purchase,
-          CAST({ref_lit} - last_purchase AS INT) AS days_since_last_purchase,
-          bounced,
-          CAST(LEAST(99,
-            12
-            + LEAST(45, complaints * 8)
-            + CASE WHEN last_purchase IS NULL THEN 40
-                   WHEN last_purchase < {ref_lit} - INTERVAL 365 DAY THEN 20
-                   WHEN last_purchase < {ref_lit} - INTERVAL 180 DAY THEN 10
-                   ELSE 0 END
-            + CASE WHEN orders = 0 THEN 25 ELSE 0 END
-            + LEAST(15, bounced * 10)
-          ) AS INT) AS risk_score
-        FROM agg
-        ORDER BY risk_score DESC, Customer_ID
-        LIMIT {limit}
-        """
-        rows = con.execute(sql).fetchall()
-        cols = [d[0] for d in con.description]
-    finally:
-        con.close()
-    return _dump({"columns": cols, "rows": rows, "n_rows": len(rows)})
+    rows = engine_at_risk(limit)
+    cols = ["Customer_ID", "Customer_Segment", "Customer_Status", "complaints",
+            "orders", "revenue", "last_purchase", "days_since_last_purchase",
+            "bounced", "risk_score", "risk_level"]
+    return _dump({
+        "columns": cols,
+        "rows": [
+            [
+                r["customer_id"], r["segment"], r["status"], r["complaints"],
+                r["orders"], r["revenue"], r["last_purchase"], r["days_since"],
+                r["bounced"], r["risk_score"], r["risk_level"],
+            ]
+            for r in rows
+        ],
+        "n_rows": len(rows),
+    })

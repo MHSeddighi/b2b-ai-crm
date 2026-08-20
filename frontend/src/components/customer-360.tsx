@@ -36,7 +36,7 @@ import {
   type CollectionRecord,
   type MarketSignalRecord,
 } from "@/lib/api";
-import { formatCurrency, formatNumber, formatDate, cn } from "@/lib/utils";
+import { formatCurrency, formatNumber, formatDate, withDot, cn } from "@/lib/utils";
 import { SectionCard } from "@/components/section-card";
 
 const riskTone: Record<string, string> = {
@@ -118,20 +118,18 @@ function SectionList<T>({
   items,
   render,
   empty,
-  scrollHeight = "max-h-80",
 }: {
   items: T[];
   render: (item: T) => ReactNode;
   empty: string;
-  scrollHeight?: string;
 }) {
   if (items.length === 0) {
     return (
-      <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{empty}</p>
+      <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot(empty)}</p>
     );
   }
   return (
-    <div className={cn("space-y-2 overflow-y-auto scrollbar-thin", scrollHeight)}>
+    <div className="space-y-2">
       {items.map((item, i) => (
         <div key={i}>{render(item)}</div>
       ))}
@@ -307,15 +305,7 @@ function SummaryText({ text }: { text: string }) {
   return (
     <div className="space-y-2">
       {lines.map((line, i) => {
-        const trimmed = line.trim().replace(/[.\u06D4]+$/, "");
-        if (trimmed.startsWith("- ") || trimmed.startsWith("• ")) {
-          return (
-            <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
-              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/70" />
-              <span>{trimmed.replace(/^[-•]\s*/, "")}</span>
-            </p>
-          );
-        }
+        const trimmed = line.trim();
         const isHeader = /^[^\s:]{2,}:$/.test(trimmed) || trimmed.startsWith("**");
         if (isHeader) {
           return (
@@ -324,9 +314,18 @@ function SummaryText({ text }: { text: string }) {
             </p>
           );
         }
+        const body = withDot(trimmed.replace(/\*\*/g, ""));
+        if (body.startsWith("- ") || body.startsWith("• ")) {
+          return (
+            <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
+              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/70" />
+              <span>{body.replace(/^[-•]\s*/, "")}</span>
+            </p>
+          );
+        }
         return (
           <p key={i} className="text-sm leading-relaxed text-foreground/90">
-            {trimmed.replace(/\*\*/g, "")}
+            {body}
           </p>
         );
       })}
@@ -401,45 +400,13 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
     return () => stopPollRef.current();
   }, [customerId]);
 
-  function pollUntilReady(id: string) {
-    let stopped = false;
-    stopPollRef.current();
-    stopPollRef.current = () => {
-      stopped = true;
-    };
-    let tries = 0;
-    const tick = async () => {
-      if (stopped) return;
-      if (tries > 200) {
-        setRefreshing(false);
-        return;
-      }
-      tries += 1;
-      try {
-        const res = await fetchCustomer360Summary(id);
-        if (res.status === "ready") {
-          setSummary(res);
-          setRefreshing(false);
-          return;
-        }
-      } catch {
-        /* keep polling */
-      }
-      setTimeout(tick, 2500);
-    };
-    tick();
-  }
-
   function refreshSummary() {
     setRefreshing(true);
+    // The backend waits for the regeneration to finish — single request, no polling.
     fetchCustomer360Summary(customerId, true)
       .then((res) => {
-        if (res.status === "ready") {
-          setSummary(res);
-          setRefreshing(false);
-        } else {
-          pollUntilReady(customerId);
-        }
+        if (res.status === "ready") setSummary(res);
+        setRefreshing(false);
       })
       .catch(() => setRefreshing(false));
   }
@@ -555,7 +522,7 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           ) : (
             <div className="flex flex-col items-start gap-3">
               <p className="text-sm text-muted-foreground">
-                خلاصه هوشمند هنوز برای این مشتری آماده نشده است
+                با کلیک روی «آماده‌سازی خلاصه»، خلاصه هوشمند از روی داده‌های واقعی این مشتری ساخته می‌شود
               </p>
               <Button size="sm" onClick={refreshSummary}>
                 <Sparkles className="mr-1 h-3.5 w-3.5" />
@@ -676,7 +643,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
             icon={Activity}
             title="نشانه‌های وضعیت مشتری"
             count={view.riskSignals.length}
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.riskSignals} render={(s) => <SignalRow signal={s} />} empty="نشانه‌ای ثبت نشده است" />
           </SectionCard>
@@ -687,7 +653,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
             icon={Lightbulb}
             title="اقدام پیشنهادی"
             count={view.actions.length}
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.actions} render={(a) => <ActionItem action={a} />} empty="اقدام پیشنهادی‌ای نیست" />
           </SectionCard>
@@ -698,7 +663,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
             icon={MessageSquareWarning}
             title="شکایات و عوامل آن"
             count={view.complaintList.length}
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است" />
           </SectionCard>
@@ -709,7 +673,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
             icon={Handshake}
             title="تعاملات و پیگیری‌ها"
             count={view.interactionsCount}
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.interactions} render={(i) => <InteractionCard i={i} />} empty="تعاملی ثبت نشده است" />
           </SectionCard>
@@ -720,7 +683,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
             icon={Receipt}
             title="سفارش‌ها و تراکنش‌ها"
             count={view.transactions.length}
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.transactions} render={(t) => <TransactionRow t={t} />} empty="تراکنشی ثبت نشده است" />
           </SectionCard>
@@ -738,7 +700,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 </Badge>
               ) : undefined
             }
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است" />
           </SectionCard>
@@ -756,7 +717,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 </Badge>
               ) : undefined
             }
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است" />
           </SectionCard>
@@ -774,7 +734,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
                 </Badge>
               ) : undefined
             }
-            scrollHeight="max-h-80"
           >
             <SectionList items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است" />
           </SectionCard>
@@ -786,8 +745,7 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
               icon={MailQuestion}
               title="نشانه‌های بازار"
               count={view.marketSignals.length}
-              scrollHeight="max-h-80"
-            >
+              >
               <SectionList items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است" />
             </SectionCard>
           </div>

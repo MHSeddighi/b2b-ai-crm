@@ -107,45 +107,16 @@ def _dashboard_intelligence(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     ref = date_ref()
     ref_lit = f"DATE '{ref.isoformat()}'"
 
-    at_rows = con.execute(f"""
-        WITH agg AS (
-          SELECT c.Customer_ID,
-            (SELECT COUNT(*) FROM complaints co
-              WHERE co.Customer_ID = c.Customer_ID) AS complaints,
-            (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
-              WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
-            (SELECT COUNT(DISTINCT s."شماره فاکتور") FROM sales s
-              WHERE s.Customer_ID = c.Customer_ID) AS orders,
-            (SELECT COALESCE(SUM(s."مبلغ کل"), 0) FROM sales s
-              WHERE s.Customer_ID = c.Customer_ID) AS revenue,
-            (SELECT COUNT(*) FROM collections col
-              WHERE col.Customer_ID = c.Customer_ID
-                AND col."چک برگشتی" = 'بله') AS bounced
-          FROM customers c
-        )
-        SELECT Customer_ID, complaints, orders, revenue, last_purchase,
-               CAST({ref_lit} - last_purchase AS INT) AS days_since,
-               bounced,
-               CAST(LEAST(99,
-                 12
-                 + LEAST(45, complaints * 8)
-                 + CASE WHEN last_purchase IS NULL THEN 40
-                        WHEN last_purchase < {ref_lit} - INTERVAL 365 DAY THEN 20
-                        WHEN last_purchase < {ref_lit} - INTERVAL 180 DAY THEN 10
-                        ELSE 0 END
-                 + CASE WHEN orders = 0 THEN 25 ELSE 0 END
-                 + LEAST(15, bounced * 10)
-               ) AS INT) AS risk_score
-        FROM agg
-        ORDER BY risk_score DESC, Customer_ID
-        LIMIT 12
-    """).fetchall()
-    at_risk_count = len(at_rows)
-    at_risk_revenue = sum(r[3] or 0 for r in at_rows)
+    # At-risk ranking comes from the real signal engine (cached), never from a
+    # hand-written heuristic.
+    from backend.crm.at_risk import engine_at_risk
+    at_risk_rows = engine_at_risk(12)
+    at_risk_count = len(at_risk_rows)
+    at_risk_revenue = sum(r["revenue"] or 0 for r in at_risk_rows)
 
     themes = con.execute("""
         SELECT Complaint_Title, COUNT(*) AS v
-        FROM complaints GROUP BY 1 ORDER BY v DESC LIMIT 6
+        FROM complaints GROUP BY 1 ORDER BY v DESC, Complaint_Title LIMIT 6
     """).fetchall()
 
     offers = con.execute("""
@@ -154,7 +125,7 @@ def _dashboard_intelligence(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
                SUM(CASE WHEN Result = 'قبول' THEN 1 ELSE 0 END) AS accepted
         FROM offers GROUP BY 1
         HAVING COUNT(*) >= 5
-        ORDER BY accepted * 1.0 / COUNT(*) DESC
+        ORDER BY accepted * 1.0 / COUNT(*) DESC, Offer_Type
     """).fetchall()
     offer_eff = [
         {"type": t, "rate": (a / n) if n else 0, "count": n}
@@ -187,26 +158,14 @@ def _dashboard_intelligence(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
                COALESCE(SUM(s."مبلغ کل"), 0) AS v
         FROM customers c
         LEFT JOIN sales s ON c.Customer_ID = s.Customer_ID
-        GROUP BY 1 ORDER BY v DESC
+        GROUP BY 1 ORDER BY v DESC, 1
     """).fetchall()
 
     return {
         "at_risk": {
             "count": at_risk_count,
             "revenue": round(at_risk_revenue),
-            "top": [
-                {
-                    "customer_id": r[0],
-                    "complaints": r[1],
-                    "orders": r[2],
-                    "revenue": round(r[3] or 0),
-                    "last_purchase": r[4],
-                    "days_since": r[5],
-                    "bounced": r[6],
-                    "risk_score": r[7],
-                }
-                for r in at_rows
-            ],
+            "top": at_risk_rows,
         },
         "complaint_themes": [
             {"name": t, "count": c} for t, c in themes
@@ -293,36 +252,16 @@ def _income_recommendations(con: duckdb.DuckDBPyConnection) -> list[dict[str, An
     return recs
 
 
-def _global_fingerprint(con: duckdb.DuckDBPyConnection) -> str:
-    """Cheap portfolio data fingerprint: counts + newest dates of the main
-    tables. Used to cache the analyses/dashboard-intelligence payloads so
-    repeat visits read instantly and caches invalidate on data change."""
-    from backend.crm import cache as store
-    row = con.execute("""
-        SELECT
-          (SELECT COUNT(*) FROM customers),
-          (SELECT COUNT(*) FROM sales),
-          (SELECT COUNT(*) FROM complaints),
-          (SELECT COUNT(*) FROM crm_interactions),
-          (SELECT COUNT(*) FROM offers),
-          (SELECT COUNT(*) FROM collections),
-          (SELECT COUNT(*) FROM dev_requests),
-          (SELECT COALESCE(MAX("تاریخ"),'') FROM sales),
-          (SELECT COALESCE(MAX(Created_At),'') FROM complaints),
-          (SELECT COALESCE(MAX(Event_Time),'') FROM crm_interactions)
-    """).fetchone()
-    return store.fingerprint(row)
-
-
 def analyses() -> dict[str, Any]:
     """Real, computed payloads for the Analyses page (no LLM involved).
 
     Cached under the global data fingerprint: first visit computes, later
     visits read instantly until the underlying data changes."""
     from backend.crm import cache as store
+    from backend.crm import data as crm_data
     con = _connect()
     try:
-        fp = _global_fingerprint(con)
+        fp = crm_data.global_fingerprint(con)
     finally:
         con.close()
     return store.cached("analyses", "overview",
@@ -335,59 +274,27 @@ def _analyses_compute() -> dict[str, Any]:
         ref = date_ref()
         ref_lit = f"DATE '{ref.isoformat()}'"
 
-        at_rows = con.execute(f"""
-            WITH agg AS (
-              SELECT c.Customer_ID, c.Customer_Segment, c.Customer_Status,
-                (SELECT COUNT(*) FROM complaints co
-                  WHERE co.Customer_ID = c.Customer_ID) AS complaints,
-                (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
-                  WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
-                (SELECT COUNT(DISTINCT s."شماره فاکتور") FROM sales s
-                  WHERE s.Customer_ID = c.Customer_ID) AS orders,
-                (SELECT COALESCE(SUM(s."مبلغ کل"), 0) FROM sales s
-                  WHERE s.Customer_ID = c.Customer_ID) AS revenue,
-                (SELECT COUNT(*) FROM collections col
-                  WHERE col.Customer_ID = c.Customer_ID
-                    AND col."چک برگشتی" = 'بله') AS bounced
-              FROM customers c
-            )
-            SELECT Customer_ID, Customer_Segment, Customer_Status, complaints,
-                   orders, revenue, last_purchase,
-                   CAST({ref_lit} - last_purchase AS INT) AS days_since,
-                   bounced,
-                   CAST(LEAST(99,
-                     12
-                     + LEAST(45, complaints * 8)
-                     + CASE WHEN last_purchase IS NULL THEN 40
-                            WHEN last_purchase < {ref_lit} - INTERVAL 365 DAY THEN 20
-                            WHEN last_purchase < {ref_lit} - INTERVAL 180 DAY THEN 10
-                            ELSE 0 END
-                     + CASE WHEN orders = 0 THEN 25 ELSE 0 END
-                     + LEAST(15, bounced * 10)
-                   ) AS INT) AS risk_score
-            FROM agg
-            ORDER BY risk_score DESC, Customer_ID
-            LIMIT 15
-        """).fetchall()
+        # At-risk accounts ranked by the real signal engine (cached).
+        from backend.crm.at_risk import engine_at_risk
         at_risk = [
             {
-                "customer": r[0],
-                "segment": r[1],
-                "status": r[2],
-                "complaints": r[3],
-                "orders": r[4],
-                "revenue": round(r[5] or 0),
-                "last_purchase": r[6],
-                "days_since": r[7],
-                "bounced": r[8],
-                "risk_level": "زیاد" if r[9] >= 65 else ("متوسط" if r[9] >= 35 else "کم"),
+                "customer": r["customer_id"],
+                "segment": r["segment"],
+                "status": r["status"],
+                "complaints": r["complaints"],
+                "orders": r["orders"],
+                "revenue": r["revenue"],
+                "last_purchase": r["last_purchase"],
+                "days_since": r["days_since"],
+                "bounced": r["bounced"],
+                "risk_level": r["risk_level"],
             }
-            for r in at_rows
+            for r in engine_at_risk(15)
         ]
 
         themes = con.execute("""
             SELECT Complaint_Title, COUNT(*) AS v
-            FROM complaints GROUP BY 1 ORDER BY v DESC LIMIT 8
+            FROM complaints GROUP BY 1 ORDER BY v DESC, Complaint_Title LIMIT 8
         """).fetchall()
         complaint_themes = [
             {"name": t, "count": c} for t, c in themes
@@ -399,7 +306,7 @@ def _analyses_compute() -> dict[str, Any]:
                    COUNT(DISTINCT c.Customer_ID) AS n
             FROM customers c
             LEFT JOIN sales s ON c.Customer_ID = s.Customer_ID
-            GROUP BY 1 ORDER BY v DESC
+            GROUP BY 1 ORDER BY v DESC, 1
         """).fetchall()
         revenue_concentration = [
             {"name": s, "value": round(v), "customers": n}
@@ -611,7 +518,7 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
         cm_reasons = con.execute("""
             SELECT Complaint_Title, COUNT(*) AS v
             FROM complaints WHERE Customer_ID = ?
-            GROUP BY 1 ORDER BY v DESC LIMIT 5
+            GROUP BY 1 ORDER BY v DESC, 1 LIMIT 5
         """, [customer_id]).fetchall()
 
         coll = con.execute("""

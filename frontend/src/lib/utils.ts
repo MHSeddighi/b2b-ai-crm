@@ -31,6 +31,14 @@ export function formatPercent(value: number): string {
   return `${sign}${new Intl.NumberFormat("fa-IR", { maximumFractionDigits: 1 }).format(value)}٪`;
 }
 
+/** Ensure a body/description sentence ends with a Persian period.
+ * Titles and subtitles must NOT use this helper. */
+export function withDot(text: string): string {
+  const t = String(text).trim();
+  if (!t) return t;
+  return /[.!?؟۔…]$/.test(t) ? t : `${t}.`;
+}
+
 /** Gregorian ISO date (YYYY-MM-DD) -> Persian (Jalali) date with Persian digits. */
 export function formatDate(value: string | null | undefined): string {
   if (!value) return "—";

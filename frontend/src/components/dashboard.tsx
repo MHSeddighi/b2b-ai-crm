@@ -41,7 +41,7 @@ import {
   type DistributionSlice,
   type SummaryStatus,
 } from "@/lib/api";
-import { formatCompact, formatCurrency, formatNumber, cn } from "@/lib/utils";
+import { formatCompact, formatCurrency, formatNumber, withDot, cn } from "@/lib/utils";
 import { SectionCard } from "@/components/section-card";
 
 const kpiIcons: Record<string, typeof Users> = {
@@ -113,15 +113,7 @@ function SummaryText({ text }: { text: string }) {
   return (
     <div className="space-y-2">
       {lines.map((line, i) => {
-        const trimmed = line.trim().replace(/[.\u06D4]+$/, "");
-        if (trimmed.startsWith("- ") || trimmed.startsWith("• ")) {
-          return (
-            <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
-              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/70" />
-              <span>{trimmed.replace(/^[-•]\s*/, "")}</span>
-            </p>
-          );
-        }
+        const trimmed = line.trim();
         const isHeader = /^[^\s:]{2,}:$/.test(trimmed) || trimmed.startsWith("**");
         if (isHeader) {
           return (
@@ -130,9 +122,18 @@ function SummaryText({ text }: { text: string }) {
             </p>
           );
         }
+        const body = withDot(trimmed.replace(/\*\*/g, ""));
+        if (body.startsWith("- ") || body.startsWith("• ")) {
+          return (
+            <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
+              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/70" />
+              <span>{body.replace(/^[-•]\s*/, "")}</span>
+            </p>
+          );
+        }
         return (
           <p key={i} className="text-sm leading-relaxed text-foreground/90">
-            {trimmed.replace(/\*\*/g, "")}
+            {body}
           </p>
         );
       })}
@@ -190,7 +191,7 @@ function PurchaseTrendChart({ data }: { data: DashboardData["purchaseTrend"] }) 
     <Card className="h-full animate-fade-in-up" style={{ animationDelay: "240ms" }}>
       <CardHeader>
         <CardTitle className="text-base">روند فروش</CardTitle>
-        <CardDescription>حجم فروش ماهانه (مبالغ کل)</CardDescription>
+        <CardDescription>{withDot("حجم فروش ماهانه (مبالغ کل)")}</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="h-64">
@@ -220,7 +221,7 @@ function ComplaintTrendChart({ data }: { data: DashboardData["complaintTrend"] }
     <Card className="h-full animate-fade-in-up" style={{ animationDelay: "300ms" }}>
       <CardHeader>
         <CardTitle className="text-base">روند شکایات</CardTitle>
-        <CardDescription>شکایات ثبت‌شده در هر ماه</CardDescription>
+        <CardDescription>{withDot("شکایات ثبت‌شده در هر ماه")}</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="h-64">
@@ -290,7 +291,7 @@ function CombinedDistribution({ data }: { data: DashboardData }) {
           <PieChartIcon className="h-4 w-4 text-muted-foreground" />
           ترکیب مشتریان
         </CardTitle>
-        <CardDescription>بخش بازار و وضعیت مشتریان در یک نگاه</CardDescription>
+        <CardDescription>{withDot("بخش بازار و وضعیت مشتریان در یک نگاه")}</CardDescription>
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-2 lg:gap-12">
@@ -325,45 +326,14 @@ export function Dashboard() {
     return () => stopPollRef.current();
   }, []);
 
-  function pollUntilReady() {
-    let stopped = false;
-    stopPollRef.current();
-    stopPollRef.current = () => {
-      stopped = true;
-    };
-    let tries = 0;
-    const tick = async () => {
-      if (stopped) return;
-      if (tries > 200) {
-        setRefreshing(false);
-        return;
-      }
-      tries += 1;
-      try {
-        const res = await fetchDashboardIntelligence();
-        if (res.status === "ready") {
-          setSummary(res);
-          setRefreshing(false);
-          return;
-        }
-      } catch {
-        /* keep polling */
-      }
-      setTimeout(tick, 2500);
-    };
-    tick();
-  }
-
   function refreshSummary() {
     setRefreshing(true);
+    // The backend waits for the regeneration to finish, so a single request
+    // is enough — no polling loop.
     fetchDashboardIntelligence(true)
       .then((res) => {
-        if (res.status === "ready") {
-          setSummary(res);
-          setRefreshing(false);
-        } else {
-          pollUntilReady();
-        }
+        if (res.status === "ready") setSummary(res);
+        setRefreshing(false);
       })
       .catch(() => setRefreshing(false));
   }
@@ -381,7 +351,7 @@ export function Dashboard() {
       <div className="space-y-6">
         <div className="flex flex-col gap-1 pt-4">
           <h1 className="text-2xl font-semibold tracking-tight">داشبورد</h1>
-          <p className="text-sm text-muted-foreground">نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار</p>
+          <p className="text-sm text-muted-foreground">{withDot("نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار")}</p>
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {[0, 1, 2, 3].map((i) => (
@@ -405,7 +375,7 @@ export function Dashboard() {
     <div className="space-y-6">
       <div className="flex flex-col gap-1 pt-4">
         <h1 className="text-2xl font-semibold tracking-tight">داشبورد</h1>
-        <p className="text-sm text-muted-foreground">نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار</p>
+        <p className="text-sm text-muted-foreground">{withDot("نمای کلی عملکرد، فروش و وضعیت مشتریان کسب‌وکار")}</p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -440,7 +410,7 @@ export function Dashboard() {
           ) : (
             <div className="flex flex-col items-start gap-3">
               <p className="text-sm text-muted-foreground">
-                تحلیل کلی هوشمند هنوز آماده نشده است؛ برای محاسبه دکمه «تازه‌سازی» را بزنید
+                با کلیک روی «تازه‌سازی»، تحلیل کلی هوشمند از روی داده‌های واقعی محاسبه می‌شود.
               </p>
               <Button size="sm" onClick={refreshSummary}>
                 <Sparkles className="mr-1 h-3.5 w-3.5" />
@@ -492,7 +462,7 @@ export function Dashboard() {
             }
           >
             {intel.at_risk.top.length === 0 ? (
-              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">مشتری در معرض از دست رفتنی یافت نشد</p>
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("مشتری در معرض از دست رفتنی یافت نشد")}</p>
             ) : (
               <div className="space-y-2">
                 {intel.at_risk.top.map((r) => (
@@ -525,7 +495,7 @@ export function Dashboard() {
             count={intel.complaint_themes.length}
           >
             {intel.complaint_themes.length === 0 ? (
-              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">شکایتی ثبت نشده است</p>
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("شکایتی ثبت نشده است")}</p>
             ) : (
               <div className="space-y-2.5">
                 {intel.complaint_themes.map((t) => (
@@ -549,7 +519,7 @@ export function Dashboard() {
             count={intel.offer_effectiveness.length}
           >
             {intel.offer_effectiveness.length === 0 ? (
-              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">پیشنهادی ثبت نشده است</p>
+              <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">{withDot("پیشنهادی ثبت نشده است")}</p>
             ) : (
               <div className="space-y-2.5">
                 {intel.offer_effectiveness.map((o) => (
