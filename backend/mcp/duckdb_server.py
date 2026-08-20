@@ -15,6 +15,7 @@ Run standalone (stdio transport):
     python -m backend.mcp.duckdb_server
 """
 import json
+import random
 import uuid
 import warnings
 from typing import Any
@@ -92,7 +93,10 @@ def _execute(query: str, max_rows: int) -> dict[str, Any]:
         all_rows = cur.fetchall()
         total = len(all_rows)
         truncated = bool(max_rows) and total > max_rows
-        out_rows = all_rows[:max_rows] if truncated else all_rows
+        # Uniform random sample (not just the first N rows) so a huge result
+        # stays representative of the whole set instead of whatever order the
+        # query happened to return rows in.
+        out_rows = random.sample(all_rows, max_rows) if truncated else all_rows
         safe_rows = [[_to_json_safe(v) for v in r] for r in out_rows]
         return {
             "resultId": f"r_{uuid.uuid4().hex[:12]}",  # server-generated

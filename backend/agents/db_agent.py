@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -11,7 +12,7 @@ from mcp.client.stdio import stdio_client
 from openai import AsyncOpenAI, OpenAI
 
 from backend.agents import contracts
-from backend.agents.analysis import is_huge, too_huge_message
+from backend.agents.analysis import rank_discriminators
 from backend.agents.context import SessionState, answer_preview
 from backend.config import settings
 from backend.mcp.schema_context import CUSTOMER360_SCHEMA
@@ -30,7 +31,11 @@ for key in (
 
 
 MAX_SESSIONS = 200
-MAX_QUERIES = 3
+# Comparative/root-cause analysis (see PLANNER_SYSTEM) is a search for what
+# discriminates two classes: it needs an entity query, a contrasting-class
+# query, and comparisons across SEVERAL different tables/feature groups until
+# an actual difference turns up — routinely 3-6 steps, not 1-2.
+MAX_QUERIES = 7
 _SESSIONS: dict[str, SessionState] = {}
 
 BLOCK_TYPES_TEXT = ", ".join(sorted(BLOCK_TYPES))
@@ -92,6 +97,12 @@ Rules:
 - Use the minimum number of tools needed.
 - Prefer one tool; use more only when necessary.
 - Use an existing result when it already contains the required information (reuse).
+- "reuse" is ONLY valid when the resultId is one of the exact ids already
+  listed under "Relevant conversation context" below. Never invent, guess, or
+  use a placeholder resultId (e.g. never write "previous_result_id" or similar)
+  — if there is no earlier result that already contains the answer (including
+  on the first turn of a conversation, when no results exist yet), use "query"
+  instead.
 - If no tool is needed, return an empty steps array.
 - Never invent tool names or inputs.
 - Do not answer the user; only create the execution plan.
@@ -100,9 +111,135 @@ Rules:
 - Keep the result small: filter, join, aggregate, sort and LIMIT inside the SQL.
 - For orders use COUNT(DISTINCT order_id); orders ≠ lines ≠ units.
 - SQL must be read-only and start with SELECT or WITH.
+- Each "query" step's SQL must be exactly ONE statement — never write two SELECT
+  statements chained with ";" inside a single step's "query" field. If you need
+  data from more than one table/query, add a SEPARATE step object to the
+  "steps" array for each one — one step, one statement.
+- Never use UNION/INTERSECT/EXCEPT to combine rows from different tables that
+  represent different kinds of entities (e.g. dev_requests and offers, or
+  orders and complaints) — DuckDB requires every branch to have the exact
+  same number, order, and type of columns, and merging unrelated entities
+  into one result table is not useful anyway. When a question needs signals
+  from more than one such table (e.g. "sales and product-development
+  opportunities"), plan one separate "query" step per table instead (this
+  plan supports several query steps) — never SELECT * in a set operation.
+  A set operation is only appropriate to merge rows that already share the
+  exact same explicit column list from the same kind of query (e.g. the same
+  SELECT list against two date ranges).
 - If the question needs more than one query or may return a large result, that
   is fine — plan it. The assistant will let the user know it is processing in a
   few steps.
+
+Root-cause / comparative analysis — think of it as binary classification:
+- A question that asks WHY a metric is high/low, asks for factors/drivers/
+  causes, asks for opportunities, or implies a judgment ("many", "few",
+  "more", "worse", "better", "top", "best-selling", "bottom", "worst") is
+  really asking you to find what DISCRIMINATES two classes:
+    - the POSITIVE class: the entity/segment the question is actually about.
+    - the CONTRASTING class: its natural opposite. Prefer an EXPLICIT
+      opposite when the question has one — for "best-selling product", the
+      contrast is the WORST-selling product (find it with its own query, e.g.
+      ORDER BY the same metric ASC LIMIT 1), not just "everything else"; for
+      "the product group with the most complaints", the contrast is the
+      group with the FEWEST complaints. Fall back to "the rest of the
+      population" only when there's no sharper natural opposite.
+  Answering with only the positive class's own data can never explain
+  anything — it can only describe it.
+- You are hunting for the FACTOR OF DIFFERENCE, not the factor in common.
+  Finding that some feature is SIMILAR between the two classes is not a
+  finding — it gives the user nothing to act on. So:
+    1. Compare the two classes on the ONE table most obviously related to the
+       question first (e.g. quality_labs for a complaints/quality question,
+       sales for a best-seller/worst-seller question).
+    2. If that comparison comes back similar/inconclusive, do NOT stop there
+       — plan MORE query steps checking OTHER tables/feature groups that
+       could plausibly discriminate the two classes: pricing/discounts
+       (offers, sales), customer segment/location (customers), payment
+       behavior (collections), interaction patterns (crm_interactions),
+       product development signals (dev_requests), market conditions
+       (market_signals), quality (quality_labs) — pick whichever actually
+       fit the schema and the question, and check SEVERAL of them.
+    3. This usually means 3-6 query steps total for a real root-cause
+       question, not 1-2 — use as many as needed (up to the limit) to
+       actually FIND a discriminating factor, not just to describe one side.
+- DON'T SPEND EVERY STEP ON THE SAME TABLE. Averaging two more numeric
+  columns from a table that already came back near-identical will not
+  suddenly reveal anything — that is a dead end, and repeating it is the most
+  common way these plans fail. Numeric lab/measurement averages in particular
+  are often nearly identical across groups. Always include at least one step
+  on a DESCRIPTIVE/CATEGORICAL dimension, which is usually where real
+  differences live: GROUP BY a category and compare the MIX/share between the
+  two classes, e.g. products."دسته بندی براقیت" (luster class),
+  products."گروه رنگ" (colour), products."زیرگروه کالا" (denier),
+  complaints.Complaint_Title (which complaint TYPES dominate each class),
+  complaints.Severity, customers.Customer_Segment, offers.Offer_Type. A
+  categorical mix comparison ("70% of class A is luster 2 but only 23% of
+  class B") is far more actionable than another pair of near-equal averages.
+- EVERY comparison query MUST be an AGGREGATE query (COUNT, AVG, SUM, a
+  percentage, GROUP BY) that returns a small summary — ONE row per class
+  being compared, never a raw row-level join/list. This is critical: the
+  analyst downstream only ever sees a handful of SAMPLE rows from a large
+  raw result, so a raw join of thousands of rows is USELESS for comparison —
+  it can't see enough of it to compute anything. An aggregate's single
+  summary row is never truncated, so the exact number is always fully
+  visible. NEVER plan
+  "SELECT c.*, q.* FROM complaints c JOIN quality_labs q ... WHERE segment=X"
+  for a comparison — plan
+  "SELECT COUNT(*), AVG(q.Tensile_Strength_cN_dtex), ... FROM complaints c
+  JOIN quality_labs q ... WHERE segment=X" (and the same shape for the
+  contrasting class) instead.
+  Worked example 1 — "why does group 3 have more complaints, what's
+  different about it" (positive class = group 3, contrast = other groups):
+  Step 1 (share of total): SELECT COUNT(*) FILTER (WHERE p."گروه کالا" =
+  'Product_Family_03') * 100.0 / COUNT(*) AS pct_group3 FROM complaints c
+  JOIN products p ON c.Product_ID = p.Product_ID
+  Step 2 (quality comparison): SELECT p."گروه کالا" AS segment,
+  AVG(q.Tensile_Strength_cN_dtex) AS avg_tensile, AVG(q.Elongation_Pct) AS
+  avg_elongation FROM quality_labs q JOIN products p ON q.Product_ID =
+  p.Product_ID GROUP BY p."گروه کالا"
+  Step 3 (if step 2 was similar, try another table — pricing):
+  SELECT p."گروه کالا" AS segment, AVG(s."قیمت فی فروش") AS avg_price,
+  AVG(s."مقدار") AS avg_qty FROM sales s JOIN products p ON s.Product_ID =
+  p.Product_ID GROUP BY p."گروه کالا"
+  Worked example 2 — "what's our best-selling product" (implies: what makes
+  it sell — positive class = the top seller, contrast = the bottom seller,
+  found with its OWN query, not "the rest"):
+  Step 1: SELECT Product_ID, SUM("مقدار") AS units FROM sales GROUP BY
+  Product_ID ORDER BY units DESC LIMIT 1
+  Step 2: SELECT Product_ID, SUM("مقدار") AS units FROM sales GROUP BY
+  Product_ID ORDER BY units ASC LIMIT 1
+  Step 3+: compare the two products' price, quality, offers, complaints,
+  etc. — whichever tables plausibly explain the sales gap.
+  Prefer computing the two classes in a SINGLE query when they share the
+  same shape, e.g.
+  SELECT 'گروه 3' AS segment, COUNT(*) AS n FROM complaints WHERE ...
+  UNION ALL SELECT 'سایر گروه‌ها', COUNT(*) FROM complaints WHERE ...
+  — both branches select the exact same columns, which is a normal,
+  encouraged use of UNION ALL and different from the earlier rule against
+  combining rows from unrelated entity tables. One result with both rows is
+  easier to compare, chart, and reason about than two separate results.
+- A plain factual lookup ("what is X", "show me Y", "list Z") does not need
+  this — keep those to the minimum single query as before. This rule is only
+  for questions that ask for an explanation, comparison, or judgment.
+
+Data to support the closing recommendation:
+- The assistant ALWAYS ends its answer with a short, concrete recommendation
+  (which offer/product/discount to propose, what to investigate next, etc.).
+  It can only do that honestly if you fetch the supporting data — otherwise
+  it is forced to say "not enough data". So for an ENTITY-PROFILE question
+  ("وضعیت مشتری X", "پروفایل X", "درباره محصول Y بگو"), don't stop at the one
+  row describing the entity. Add 1-2 cheap AGGREGATE steps that make a
+  recommendation possible, e.g. for a customer:
+  * what they actually buy: SELECT Product_ID, SUM("مقدار") AS units,
+    SUM("مبلغ کل") AS revenue FROM sales WHERE Customer_ID='<id>'
+    GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+  * offers they've had and how they responded: SELECT Offer_Type, Result,
+    COUNT(*) n, ROUND(AVG(Offer_Discount_Pct),3) avg_disc FROM offers
+    WHERE Customer_ID='<id>' GROUP BY 1,2
+  * what peers in the same segment buy / what discount they get, so the
+    recommendation can be benchmarked rather than invented.
+  For a product, the equivalent: who buys it, typical discount, complaint
+  rate. Keep these aggregate and small.
 """
 
 
@@ -132,6 +269,48 @@ Rules:
 - When the results are numeric or a trend, always add a chart, metric, or table
   to visualize them — do not leave numbers as plain text alone.
 - If there is an assumption, reflect it naturally and briefly in the answer.
+- If a result's n_rows is much larger than the handful of sample rows you were
+  given, say plainly that the analysis reflects a representative sample of the
+  full data, not an exhaustive count — describe patterns/trends qualitatively
+  and never state a precise aggregate total (sum, exact count, exact
+  percentage) you cannot verify from the sample rows you actually have.
+- NEVER state a shallow, circular claim like "complaints are high because
+  quality is low" or "quality is low because there are many complaints" — a
+  reader could guess that without seeing any data, so it explains nothing.
+  Every non-trivial claim must be grounded in a SPECIFIC number actually
+  present in the results: a share/percentage of a total, a rate compared to
+  a baseline/average/other group, or a concrete feature value that differs
+  from the norm.
+- When the results include both a class and its contrast (e.g. group 3 vs.
+  other groups, best-seller vs. worst-seller), explicitly contrast them (e.g.
+  "18% of complaints vs. an 11% baseline across other groups") — describing
+  only one side is not analysis.
+- Finding that a feature is SIMILAR between the two classes is not the
+  finding — it's a checkpoint. If the results include several compared
+  features, lead with whichever ones actually DIFFER (the real explanation),
+  and only briefly mention the similar ones as ruled-out, in passing.
+- Use a short bullet list for the concrete differentiating factors — e.g.
+  "چیزهایی که گروه پرشکایت داره ولی گروه کم‌شکایت نداره" (what the
+  high-complaint group has that the low-complaint one doesn't): each bullet
+  one specific, numeric fact from the results.
+- If the results you were given don't include the comparison needed to
+  explain a "why", say plainly what IS known and that the cause isn't
+  established by this data — never invent a causal claim you can't support.
+- Do NOT write a 2-3 line answer for a comparative/root-cause question — that
+  is too short to actually be useful. Give a fuller answer: a short direct
+  opening, then the specific differentiating facts (as bullets), then what it
+  means for the business. Keep the LANGUAGE simple and non-technical — the
+  substance should be dense with real numbers, not the wording; don't pad
+  with restatement or filler just to reach a length.
+- ALWAYS finish with a "recommendation" block (2-3 lines), whatever the
+  question was: a concrete suggested next action, not a restatement of the
+  findings. E.g. for a customer profile, which product/offer type to put in
+  front of them, roughly what discount level, or which payment/credit terms
+  to propose; for a quality question, what to investigate or change.
+  Ground it in the results (segment, credit limit, payment terms, discount
+  levels actually present). If the data doesn't justify specifics, recommend
+  the obvious next step instead — NEVER fabricate a discount percentage,
+  price, or product name that isn't in the results.
 """
 
 
@@ -167,15 +346,66 @@ Rules:
 - Never invent or recalculate numbers.
 - If the data is insufficient, say so clearly.
 - Do not use headings like "Insight", "Finding", or "Analysis".
-- Keep the answer concise and natural.
-- Return ONLY plain prose. NEVER output markdown tables, numbered/dashed row
-  lists, or ASCII/Unicode bar charts (e.g. █ ██ ▌) — any tabular data, ranking,
-  or distribution is rendered by the chart/table/histogram blocks, so keep the
-  text as a readable summary and interpretation, not a re-rendered table.
+- Keep the answer natural, not padded — but see the length rule below for
+  comparative/root-cause questions specifically.
+- Mostly plain prose, but for a comparative/root-cause question use a
+  markdown bullet list (up to 6-7 bullets) for the concrete differentiating
+  facts found — e.g. "چیزهایی که گروه پرشکایت داره ولی گروه کم‌شکایت نداره"
+  (what the high-X class has that the low-X class doesn't), each bullet one
+  specific numeric fact from the results. NEVER use bullets/numbered lists or
+  ASCII/Unicode bar charts (e.g. █ ██ ▌) to re-render row-level data,
+  rankings, or distributions — that's what the chart/table/histogram blocks
+  are for, so a bullet list of data rows/ranks would just duplicate a block.
 - When the answer is large or took multiple steps (big data, several queries),
   briefly tell the user at a friendly level what is happening (e.g. "داده‌ها
   بزرگ است و پاسخ در چند مرحله آماده شد…") and then continue. Keep such notes
   short and natural.
+- If a result's n_rows is much larger than the handful of sample rows you were
+  given, say plainly that the analysis reflects a representative sample of the
+  full data, not an exhaustive count — describe patterns/trends qualitatively
+  and never state a precise aggregate total (sum, exact count, exact
+  percentage) you cannot verify from the sample rows you actually have.
+- NEVER state a shallow, circular claim like "complaints are high because
+  quality is low" or "quality is low because there are many complaints" — a
+  reader could guess that without seeing any data, so it explains nothing.
+  Every non-trivial claim must be grounded in a SPECIFIC number actually
+  present in the results: a share/percentage of a total, a rate compared to
+  a baseline/comparison class, or a concrete feature value that differs.
+- When the results compare a class against its contrast (e.g. group 3 vs.
+  other groups, best-seller vs. worst-seller), explicitly contrast them (e.g.
+  "18 درصد شکایات مربوط به این گروه است در حالی که میانگین سایر گروه‌ها 11
+  درصد است") — describing only one side is not analysis.
+- Finding a feature is SIMILAR between the two classes is not the finding —
+  it's a checkpoint. Lead with whichever compared features actually DIFFER
+  (that's the real explanation); mention similar ones only briefly, as
+  ruled-out, in passing.
+- If the results you were given don't include the comparison needed to
+  explain a "why", say plainly what IS known and that the cause isn't
+  established by this data — never invent a causal claim you can't support.
+- Do NOT write a 2-3 line answer for a comparative/root-cause question — that
+  is too short to be useful. Give a fuller answer: a short direct opening,
+  then the specific differentiating facts (as bullets), then what it means
+  for the business. Keep the LANGUAGE simple and non-technical — the
+  substance should be dense with real numbers, not the wording; don't pad
+  with restatement or filler just to reach a length. A plain factual
+  question can still get a short answer — this length rule is specifically
+  for "why"/comparison/opportunity questions.
+- ALWAYS END WITH A SHORT RECOMMENDATION (2-3 lines), whatever the question
+  was. After stating the facts, close with a concrete suggested next action
+  for this business — not a summary restatement of what you just said. Make
+  it specific and actionable, e.g. for a customer profile: which product or
+  offer type to put in front of them, roughly what discount level, or which
+  payment/credit term to propose; for a product/quality question: what to
+  investigate or change; for a sales question: where the upside is.
+  Ground it in the data you were given — reference the customer's segment,
+  their credit/payment terms, what similar customers bought, the discount
+  levels actually seen in the results, etc. If the results don't contain
+  enough to justify specifics, keep the recommendation about the obvious
+  next step (e.g. "برای پیشنهاد دقیق‌تر، سابقهٔ خرید و تخفیف‌های قبلی این
+  مشتری را بررسی کنیم") rather than inventing a product, price, or discount
+  number that isn't supported by the data. NEVER fabricate a specific
+  discount percentage, price, or product name that does not appear in the
+  results.
 """
 
 
@@ -223,6 +453,9 @@ Rules:
   asks for a distribution/histogram; metric for a single headline number;
   customer_card/product_card/order_card for a single named entity (1-row result);
   table for ranked lists or multi-column detail.
+- bar chart for a result comparing an entity against a baseline/other groups
+  (a result with a segment/label column and 2+ rows to compare) — this is the
+  most useful visual for "why"/comparison questions, prefer it over a table.
 - xKey, series[].dataKey, valueKey, dataKey must be EXACT result column names;
   if unsure which column to use, take the FIRST for the x-axis and the SECOND
   for the series.
@@ -253,6 +486,7 @@ def _llm_client() -> OpenAI:
     return OpenAI(
         api_key=settings.api_key,
         base_url=settings.resolved_base_url,
+        default_headers=settings.extra_headers or None,
     )
 
 
@@ -426,17 +660,39 @@ async def _run_sql(sql: str) -> dict[str, Any]:
         return await _call_query(session, sql)
 
 
-_SQL_FIX_SYSTEM = """You fix a failing DuckDB SQL query.
+_SQL_FIX_SYSTEM = f"""You fix a failing DuckDB SQL query.
+
+Database schema:
+{CUSTOMER360_SCHEMA}
+
 Return ONLY the corrected SQL (one read-only statement starting with SELECT or
 WITH). No explanation, no markdown fences. Keep the same intent and result
 columns. Common causes of the error:
+- Column not found / "Binder Error" referencing a column that doesn't exist
+  on that table (e.g. joining on a column only some tables have, like
+  Sales_Line_ID which complaints does NOT have): the error's own "Candidate
+  bindings" list is only what DuckDB found nearby — it is NOT the full
+  picture. Use the schema above to find the column/table that actually has
+  what you need (often the correct join key is Product_ID or Customer_ID
+  instead, or requires going through a bridge table like complaint_links) —
+  never guess a plausible-sounding column name.
 - DuckDB reserved keywords used as identifiers/aliases (e.g. asof, range,
   qualify, sample, struct) — rename them to simple aliases like t1, base,
   max_date, total_amt.
 - Casting a text/VARCHAR column (e.g. a Persian yes/no column like 'چک برگشتی'
   with values 'بله'/'خیر') to INT — filter with string literals instead.
 - Wrong date function: use strftime(x, '%Y-%m') for formatting, CAST(col AS DATE)
-  for date math; single quotes for strings, double quotes for identifiers."""
+  for date math; single quotes for strings, double quotes for identifiers.
+- Multiple statements chained with ";" ("Only single read-only SELECT / WITH
+  ... SELECT queries are allowed"): return ONLY the first statement, rewritten
+  as a complete, valid, standalone query — drop everything after the first ";".
+- UNION/INTERSECT/EXCEPT with mismatched columns ("Set operations can only
+  apply to expressions with the same number of result columns"): the branches
+  are almost always different, unrelated tables that should never have been
+  combined this way. Do NOT invent placeholder/NULL columns to force them to
+  align. Instead, drop the set operation entirely and return ONLY the first
+  branch's SELECT (rewritten as a complete, valid, standalone statement,
+  never leaving "..." or any other placeholder in the column list)."""
 
 
 def _sql_fix_prompt(question: str, sql: str, error: str) -> str:
@@ -467,18 +723,91 @@ async def _fix_sql(question: str, sql: str, error: str) -> str | None:
     return fixed
 
 
+# A query that matched zero rows is only worth retrying with a loosened
+# filter when it actually contains a quoted-literal equality/IN comparison —
+# the likely culprit when a categorical/text column's real value format
+# doesn't match what the user (or the planner) guessed (e.g. "3" vs
+# "Product_Family_03"). Numeric/date-only filters are left alone: a genuine
+# "no data" answer there should stay a "no data" answer.
+_QUOTED_FILTER_RE = re.compile(r"=\s*'[^']*'|\bIN\s*\(\s*'", re.IGNORECASE)
+
+
+def _has_quoted_filter(sql: str) -> bool:
+    return bool(_QUOTED_FILTER_RE.search(sql))
+
+
+_SQL_LOOSEN_SYSTEM = """A DuckDB query ran successfully but matched zero rows.
+This usually means an equality/IN filter used the wrong literal value or
+format for a text/categorical column (e.g. matching a bare number like '3'
+against a column that actually stores padded/prefixed labels like
+'Product_Family_03').
+
+Return ONLY the corrected SQL (one read-only statement starting with SELECT or
+WITH). No explanation, no markdown fences. Keep the same intent and result
+columns.
+
+Guidance:
+- Replace exact equality on a text/categorical column with a case-insensitive
+  partial match, e.g. WHERE col = '3' -> WHERE col ILIKE '%3%'.
+- Only loosen filters that plausibly caused the empty result (quoted
+  string literals compared with = or IN); never change numeric range
+  filters, date filters, or joins.
+- If you cannot identify a filter to loosen, return the original query
+  unchanged."""
+
+
+def _sql_loosen_prompt(question: str, sql: str) -> str:
+    return f"""A DuckDB query ran successfully but matched zero rows.
+
+User question:
+{question}
+
+Query that returned zero rows:
+{sql}
+
+Rewrite it with a loosened filter so it can find the intended rows. Return
+ONLY the corrected SQL."""
+
+
+async def _loosen_sql(question: str, sql: str) -> str | None:
+    """Ask the LLM to loosen a likely-mismatched filter once. None if it can't."""
+    try:
+        raw = await _llm_call_async(_SQL_LOOSEN_SYSTEM, _sql_loosen_prompt(question, sql), temperature=0.0)
+    except Exception:  # noqa: BLE001 - best effort
+        return None
+    loosened = (raw or "").strip().strip("`")
+    lowered = loosened.lower()
+    if not (lowered.startswith("select") or lowered.startswith("with")):
+        return None
+    return loosened
+
+
 async def _exec_query(question: str, sql: str) -> dict[str, Any]:
     """Run a query; if it returns an SQL error, ask the LLM to fix it once and
-    retry. Returns the original error if the fix doesn't help or the query is
-    genuinely bad, so failures stay explicit instead of silent."""
+    retry. If it succeeds but matches zero rows and has a quoted-literal
+    filter, ask the LLM to loosen that filter once and retry. Returns the
+    original result if no recovery helps, so genuine failures/empty answers
+    stay explicit instead of silently changing the question."""
     data = await _run_sql(sql)
-    if not data.get("error"):
-        return data
-    fixed = await _fix_sql(question, sql, data["error"])
-    if fixed and fixed.strip().lower() != sql.strip().lower():
-        data2 = await _run_sql(fixed)
-        if not data2.get("error"):
-            return data2
+    current_sql = sql
+
+    if data.get("error"):
+        fixed = await _fix_sql(question, sql, data["error"])
+        if fixed and fixed.strip().lower() != sql.strip().lower():
+            data2 = await _run_sql(fixed)
+            if not data2.get("error"):
+                data = data2
+                current_sql = fixed
+        if data.get("error"):
+            return data
+
+    if not data.get("n_rows") and _has_quoted_filter(current_sql):
+        loosened = await _loosen_sql(question, current_sql)
+        if loosened and loosened.strip().lower() != current_sql.strip().lower():
+            data2 = await _run_sql(loosened)
+            if not data2.get("error") and data2.get("n_rows"):
+                return data2
+
     return data
 
 
@@ -517,6 +846,195 @@ def _plan_from_raw(raw: str) -> dict[str, Any]:
     }
 
 
+def _invalid_reuse_id(plan: dict[str, Any], ctx: SessionState) -> str | None:
+    """Return the first "reuse" resultId in ``plan`` that doesn't actually
+    exist in this session (e.g. a hallucinated placeholder id), or None if
+    every "reuse" step is valid."""
+    for step in plan["steps"]:
+        if step["kind"] == "reuse":
+            result_id = step.get("resultId")
+            if not result_id or ctx.get_result(result_id) is None:
+                return result_id or "(missing)"
+    return None
+
+
+def _replan_prompt(question: str, ctx: SessionState, invalid_result_id: str) -> str:
+    context = ctx.render_context(
+        question,
+        active_ids=ctx.active_result_ids(),
+    )
+
+    return f"""
+Your previous plan used "reuse" with resultId "{invalid_result_id}", but no
+such result exists in this conversation (it may not exist yet — e.g. this is
+the first turn — or the id was invented). Produce a corrected plan: if data is
+needed, use "query" to run SQL directly instead of "reuse". Never invent or
+guess a resultId.
+
+User question:
+{question}
+
+Relevant conversation context (includes earlier results referenced by their
+resultId):
+{context}
+
+Return ONLY valid JSON.
+"""
+
+
+async def _replan_without_reuse(
+    question: str,
+    ctx: SessionState,
+    invalid_result_id: str,
+) -> dict[str, Any]:
+    raw = await _llm_call_async(
+        PLANNER_SYSTEM,
+        _replan_prompt(question, ctx, invalid_result_id),
+        temperature=0.0,
+    )
+    return _plan_from_raw(raw)
+
+
+# The PLANNER_SYSTEM prompt asks for a comparison/baseline query on "why" /
+# comparison / opportunity questions, but this model doesn't reliably follow
+# that on its own (observed: it kept planning a single entity-only query even
+# with the rule spelled out). This is a deterministic backstop: detect the
+# question is asking for an explanation/comparison from the planner's own
+# intent + step purposes, and if it only planned one query, force one more
+# LLM call whose only job is to add a baseline/comparison step.
+_COMPARATIVE_INTENT_RE = re.compile(
+    r"\b(why|reason|relationship|compare|comparison|factor|driver|cause|"
+    r"opportunit|impact|correlat|root[ -]?cause|versus|vs\.?|"
+    r"higher|lower|worse|better|more\s+than|less\s+than|trend)\b"
+    r"|چرا|دلیل|علت|رابطه|ارتباط|مقایسه|فرصت|عامل",
+    re.IGNORECASE,
+)
+
+
+# A question naming a concrete entity id (C_123456 / P_003511 / CUST-019) or
+# asking about stored records is a data question — an empty plan there means
+# the planner bailed out, not that no data was needed. Seen in practice: the
+# long planner prompt occasionally yields zero steps for "از وضعیت مشتری
+# C_683666 بگو", which then falls through to a generic chat reply.
+_ENTITY_ID_RE = re.compile(r"\b[A-Za-z]{1,6}[_-]\d{3,}\b")
+
+
+def _plan_missing_data(question: str, plan: dict[str, Any]) -> bool:
+    """True when an empty plan almost certainly should have queried."""
+    if plan["steps"]:
+        return False
+    return bool(_ENTITY_ID_RE.search(question))
+
+
+def _force_query_prompt(question: str, ctx: SessionState) -> str:
+    context = ctx.render_context(question, active_ids=ctx.active_result_ids())
+    return f"""Your previous plan returned no steps, but this question names a
+specific record in the database and cannot be answered without looking it up.
+
+User question:
+{question}
+
+Relevant conversation context:
+{context}
+
+Produce a plan with at least one "query" step that fetches the entity, plus
+1-2 small AGGREGATE steps giving the context needed to end with a concrete
+recommendation (what they buy, offers/discounts they've had, or how they
+compare to peers in the same segment).
+
+Return ONLY valid JSON in the plan format."""
+
+
+async def _replan_for_data(
+    question: str,
+    ctx: SessionState,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        raw = await _llm_call_async(
+            PLANNER_SYSTEM, _force_query_prompt(question, ctx), temperature=0.0
+        )
+        new_plan = _plan_from_raw(raw)
+    except Exception:  # noqa: BLE001 - keep the original plan on failure
+        return plan
+    return new_plan if new_plan["steps"] else plan
+
+
+def _needs_comparison(plan: dict[str, Any]) -> bool:
+    query_steps = [s for s in plan["steps"] if s["kind"] == "query"]
+    if len(query_steps) >= 3:
+        return False  # already has room to compare across more than one table
+    text = plan.get("intent", "") + " " + " ".join(s.get("purpose", "") for s in query_steps)
+    return bool(_COMPARATIVE_INTENT_RE.search(text))
+
+
+def _comparison_prompt(question: str, ctx: SessionState, plan: dict[str, Any]) -> str:
+    context = ctx.render_context(question, active_ids=ctx.active_result_ids())
+    existing_sql = "\n".join(
+        f"- {s['sql']}" for s in plan["steps"] if s["kind"] == "query"
+    )
+
+    return f"""Your plan for this question doesn't yet check enough to find
+what actually DISCRIMINATES the two classes involved — it either has no
+contrasting class at all, or only checked ONE table/feature group. Describing
+one side, or finding one similar feature and stopping, explains nothing.
+
+User question:
+{question}
+
+Relevant conversation context:
+{context}
+
+Your current query step(s):
+{existing_sql}
+
+Rewrite the plan, keeping any existing step(s) that are still useful, and
+adding 1-3 MORE "query" steps so the plan:
+1. Has an explicit CONTRASTING class if it's missing — the natural opposite
+   of the entity in the question (e.g. worst-seller for a best-seller
+   question, the lowest-X group for a highest-X question), not just "the
+   rest" unless there's no sharper opposite.
+2. Checks the two classes across a DIFFERENT table/feature group than
+   whatever was already queried (pricing/offers, customer segment, payment
+   behavior/collections, interaction patterns/crm_interactions, product
+   development/dev_requests, market conditions/market_signals, quality —
+   pick whichever are relevant and not yet checked) — the goal is to find a
+   feature that actually DIFFERS between the two classes, not to repeat the
+   same comparison again.
+
+Every new step MUST be an AGGREGATE query (COUNT, AVG, SUM, a percentage,
+GROUP BY) returning a small summary — ONE row per class being compared —
+NEVER a raw row-level join/copy of an existing step's SELECT list with a
+different filter. A raw join of thousands of rows is useless here: the
+downstream analyst only ever sees a handful of sample rows from a large
+result, so the real comparison number would be invisible. If an existing
+step is also a raw row-level query, rewrite it as an aggregate too.
+
+Return ONLY valid JSON in the same plan format, with all steps in "steps"."""
+
+
+async def _add_comparison_step(
+    question: str,
+    ctx: SessionState,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        raw = await _llm_call_async(
+            PLANNER_SYSTEM,
+            _comparison_prompt(question, ctx, plan),
+            temperature=0.0,
+        )
+        new_plan = _plan_from_raw(raw)
+    except Exception:  # noqa: BLE001 - fall through with the original plan
+        return plan
+
+    old_queries = len([s for s in plan["steps"] if s["kind"] == "query"])
+    new_queries = len([s for s in new_plan["steps"] if s["kind"] == "query"])
+    # Only accept the rewrite if it actually grew — otherwise keep the
+    # original rather than risk losing a working step to a worse rewrite.
+    return new_plan if new_queries > old_queries else plan
+
+
 async def _plan(
     question: str,
     ctx: SessionState,
@@ -526,7 +1044,22 @@ async def _plan(
         _plan_prompt(question, ctx),
         temperature=0.0,
     )
-    return _plan_from_raw(raw)
+    plan = _plan_from_raw(raw)
+
+    invalid_id = _invalid_reuse_id(plan, ctx)
+    if invalid_id:
+        try:
+            plan = await _replan_without_reuse(question, ctx, invalid_id)
+        except Exception:  # noqa: BLE001 - fall through with the original plan
+            pass
+
+    if _plan_missing_data(question, plan):
+        plan = await _replan_for_data(question, ctx, plan)
+
+    if _needs_comparison(plan):
+        plan = await _add_comparison_step(question, ctx, plan)
+
+    return plan
 
 
 async def _plan_stream(
@@ -546,7 +1079,43 @@ async def _plan_stream(
     ):
         raw += delta
         yield ("thinking", delta)
-    yield ("plan", _plan_from_raw(raw))
+
+    plan = _plan_from_raw(raw)
+    invalid_id = _invalid_reuse_id(plan, ctx)
+    if invalid_id:
+        try:
+            plan = await _replan_without_reuse(question, ctx, invalid_id)
+        except Exception:  # noqa: BLE001 - fall through with the original plan
+            pass
+
+    if _plan_missing_data(question, plan):
+        plan = await _replan_for_data(question, ctx, plan)
+
+    if _needs_comparison(plan):
+        plan = await _add_comparison_step(question, ctx, plan)
+
+    yield ("plan", plan)
+
+
+def _discriminator_summary(results: dict[str, SqlResult]) -> str:
+    """Pre-computed ranking of which features separate the compared classes.
+
+    Handed raw comparison rows, the model tends to fixate on the first metric
+    it sees and call the classes "similar". Computing the gaps here — and
+    naming the ruled-out features explicitly — removes that guesswork.
+    """
+    parts = [
+        text
+        for sr in results.values()
+        if (text := rank_discriminators(sr.columns, sr.rows))
+    ]
+    if not parts:
+        return ""
+    return (
+        "\nMeasured comparison (computed exactly from the FULL data, not a "
+        "sample — trust these gaps over your own reading of the rows):\n"
+        + "\n".join(parts)
+    )
 
 
 def _compose_prompt(
@@ -576,6 +1145,7 @@ Assumption:
 
 Results:
 {samples}
+{_discriminator_summary(results)}
 
 Answer the user's question using these results. The user does not know the
 database, columns, SQL, or technical terminology.
@@ -720,35 +1290,6 @@ async def _database_answer(
         else:
             return _error("نوع درخواست قابل تشخیص نیست.")
 
-    huge = next(
-        (
-            (result_id, result.n_rows)
-            for result_id, result in results.items()
-            if is_huge(result.n_rows)
-        ),
-        None,
-    )
-
-    if huge:
-        result_id, count = huge
-
-        return {
-            "blocks": validate_blocks(
-                [
-                    {
-                        "id": "b1",
-                        "type": "markdown",
-                        "content": (
-                            too_huge_message(count)
-                            + "\n\n"
-                            + f"مرجع داخلی نتیجه: {result_id}"
-                        ),
-                    }
-                ]
-            ),
-            "results": results,
-        }
-
     try:
         blocks = await _compose(
             question,
@@ -779,10 +1320,6 @@ async def _database_answer(
     state["active_result_ids"] = list(results.keys())
 
     ctx.update_state(state)
-    ctx.record_turn(
-        question,
-        answer_preview(blocks),
-    )
 
     return {
         "blocks": blocks,
@@ -818,28 +1355,44 @@ async def _llm_stream(
     """
     if not settings.has_key:
         raise RuntimeError("LLM is not configured")
-    client = AsyncOpenAI(
-        api_key=settings.api_key,
-        base_url=settings.resolved_base_url,
-    )
-    try:
-        stream = await client.chat.completions.create(
-            model=settings.resolved_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=temperature,
-            stream=True,
+
+    # Retry once if the connection drops before any content has arrived (the
+    # gateway can occasionally reset a freshly opened stream). Once content
+    # has started arriving we never retry, to avoid duplicating output.
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        client = AsyncOpenAI(
+            api_key=settings.api_key,
+            base_url=settings.resolved_base_url,
+            default_headers=settings.extra_headers or None,
         )
-        async for chunk in stream:
-            if not getattr(chunk, "choices", None):
-                continue
-            delta = chunk.choices[0].delta
-            if delta and getattr(delta, "content", None):
-                yield delta.content
-    finally:
-        await client.close()
+        yielded_any = False
+        try:
+            stream = await client.chat.completions.create(
+                model=settings.resolved_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                stream=True,
+            )
+            async for chunk in stream:
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                if delta and getattr(delta, "content", None):
+                    yielded_any = True
+                    yield delta.content
+            return
+        except Exception as exc:  # noqa: BLE001 - retried once below
+            last_exc = exc
+            if yielded_any:
+                raise
+        finally:
+            await client.close()
+    if last_exc:
+        raise last_exc
 
 
 def _serialize_results(results: dict[str, SqlResult]) -> dict[str, Any]:
@@ -869,6 +1422,7 @@ Assumption:
 
 Results:
 {samples}
+{_discriminator_summary(results)}
 
 Answer the user's question using these results, as plain natural-language text.
 Do NOT return JSON.
@@ -1045,26 +1599,6 @@ async def _database_answer_stream(
             yield {"type": "error", "message": "نوع درخواست قابل تشخیص نیست."}
             return
 
-    huge = next(
-        (
-            (result_id, result.n_rows)
-            for result_id, result in results.items()
-            if is_huge(result.n_rows)
-        ),
-        None,
-    )
-
-    if huge:
-        result_id, count = huge
-        content = too_huge_message(count) + "\n\n" + f"مرجع داخلی نتیجه: {result_id}"
-        yield {"type": "text", "text": content}
-        yield {
-            "type": "blocks",
-            "blocks": [],
-            "results": _serialize_results(results),
-        }
-        return
-
     # Stream the narrative answer text.
     yield {"type": "status", "status": "composing"}
     narrative = ""
@@ -1091,13 +1625,6 @@ async def _database_answer_stream(
     state["active_result_ids"] = list(results.keys())
 
     ctx.update_state(state)
-    ctx.record_turn(
-        question,
-        answer_preview(
-            [{"id": "b0", "type": "markdown", "content": narrative or "(پاسخ)"}]
-            + [b.model_dump() if hasattr(b, "model_dump") else b for b in blocks]
-        ),
-    )
 
     yield {
         "type": "blocks",
@@ -1119,16 +1646,38 @@ async def answer_stream(
 
     ctx = _get_session(session_id or "_")
 
+    # Accumulated so the turn can be recorded into session memory exactly once
+    # below, regardless of which path this generator exits through (success,
+    # a graceful "error" event, or a hard exception) — every previous early
+    # exit silently skipped this, which is why follow-up questions like
+    # "خلاصه بده" lost all context after any failed turn.
+    narrative = ""
+    blocks: list[Any] = []
+    error_message: str | None = None
+
     try:
         async for event in _database_answer_stream(question, ctx):
+            et = event.get("type")
+            if et == "text":
+                narrative += event.get("text", "")
+            elif et == "blocks":
+                blocks = event.get("blocks") or []
+            elif et == "error":
+                error_message = event.get("message")
             yield event
         yield {"type": "done"}
     except Exception as exc:  # noqa: BLE001
         # Hard failure: drop the cached MCP session so the next request
         # restarts it cleanly instead of reusing a broken connection.
         await close_mcp()
-        yield {"type": "error", "message": f"در پاسخ‌گویی مشکلی پیش آمد: {exc}"}
+        error_message = f"در پاسخ‌گویی مشکلی پیش آمد: {exc}"
+        yield {"type": "error", "message": error_message}
         yield {"type": "done"}
+    finally:
+        preview = error_message or answer_preview(
+            [{"id": "b0", "type": "markdown", "content": narrative}] + blocks
+        )
+        ctx.record_turn(question, preview)
 
 
 async def answer(
@@ -1149,7 +1698,7 @@ async def answer(
         )
 
     try:
-        return await _database_answer(
+        result = await _database_answer(
             question,
             ctx,
         )
@@ -1158,6 +1707,11 @@ async def answer(
         # If the MCP server died, drop the cached session so the next request
         # restarts it cleanly instead of reusing a broken connection.
         await close_mcp()
-        return _error(
+        result = _error(
             f"در پاسخ‌گویی مشکلی پیش آمد: {exc}"
         )
+
+    # Record the turn regardless of success/failure, so a follow-up question
+    # always has context of what was just asked (and whether it failed).
+    ctx.record_turn(question, answer_preview(result.get("blocks", [])))
+    return result

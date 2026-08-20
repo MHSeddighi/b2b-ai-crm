@@ -91,6 +91,17 @@ RELATIONSHIPS: list[tuple[str, str]] = [
 ]
 
 BUSINESS_RULES = """RULES:
+- ID PREFIXES ARE AUTHORITATIVE: Customer_ID always starts with "C_" and
+  Product_ID always starts with "P_" (e.g. C_011055 is a Customer_ID,
+  P_003511 is a Product_ID). When a question gives a bare ID like "C_011055",
+  filter by the column matching ITS PREFIX, never by whatever noun the
+  question's wording uses (e.g. "product C_011055" still means
+  Customer_ID = 'C_011055', because "C_" is the customer prefix).
+- "گروه کالا" (product family) values are 'Product_Family_01' through
+  'Product_Family_06' (zero-padded two digits) or 'Product_Family_GENERALIZED'
+  — a bare number like "3" or a Persian phrase like "گروه 3" always means
+  'Product_Family_03'. Translate to the real value before filtering; never
+  compare the column against a bare digit or the Persian words themselves.
 - Actual cost > estimated cost (realized_costs vs monthly_costs).
 - Customer_ID links all customer tables. CRM: use latest Record_Version per Interaction_ID.
 - Hembaft_ID != Lot_ID; link via Hembaft_Lot_Key only. As-of: usable from Available_At.
@@ -98,6 +109,24 @@ BUSINESS_RULES = """RULES:
 - DATES are TEXT ('YYYY-MM-DD') -> CAST(col AS DATE) for date math; 'ماه'/'سال' are labels (M01..SY06), not dates.
 - DuckDB: use strftime(x,'%Y-%m') (NOT to_char); single quotes for strings, double for identifiers.
 - Persian YES/NO columns are VARCHAR, NOT integers. E.g. 'چک برگشتی' (collections) holds 'بله'/'خیر' — filter as WHERE "چک برگشتی" = 'بله'. Never cast a text column to INT or compare it to a number.
+- JOIN FAN-OUT IS THE #1 SOURCE OF WRONG NUMBERS. Joining an entity table to
+  a detail table multiplies rows: complaints JOIN quality_labs ON Product_ID
+  turns 250 real complaints into 224,215 rows, because each complaint matches
+  every lab record for that product. When counting or averaging an entity
+  across a join, ALWAYS use COUNT(DISTINCT <entity>_ID) (e.g.
+  COUNT(DISTINCT Complaint_ID), COUNT(DISTINCT Customer_ID)) — never COUNT(*).
+  If you only need a count from ONE table, do not join the other table at all.
+- COMPARE RATES, NOT RAW COUNTS. A group with more products or more sales will
+  naturally have more complaints/orders — that is not a finding. Normalize:
+  complaints per 1000 sales lines, complaints per product, % of the group's
+  own total. Raw count comparisons between differently-sized groups are
+  misleading and must be avoided.
+- complaints has NO Sales_Line_ID column (only Complaint_ID, Customer_ID,
+  Product_ID). To join complaints with quality_labs (or sales/realized_costs),
+  join on Product_ID — never invent a Sales_Line_ID join on complaints, that
+  column doesn't exist there. For line-level precision, go through
+  complaint_links instead (it has both Complaint_ID and Sales_Line_ID) and
+  join complaint_links.Sales_Line_ID to quality_labs/sales.Sales_Line_ID.
 """
 
 
