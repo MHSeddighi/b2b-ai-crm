@@ -92,6 +92,316 @@ def dashboard() -> dict[str, Any]:
             "complaintTrend": complaint_trend,
             "segmentDistribution": segment_distribution,
             "statusDistribution": status_distribution,
+            "intelligence": _dashboard_intelligence(con),
+            "recommendations": _income_recommendations(con),
+        }
+    finally:
+        con.close()
+
+
+def _dashboard_intelligence(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    """Deterministic portfolio intelligence for the dashboard: at-risk revenue,
+    complaint themes, offer effectiveness, collection risk and win-back
+    opportunities. The LLM summary (cached) is layered on top separately.
+    """
+    ref = date_ref()
+    ref_lit = f"DATE '{ref.isoformat()}'"
+
+    at_rows = con.execute(f"""
+        WITH agg AS (
+          SELECT c.Customer_ID,
+            (SELECT COUNT(*) FROM complaints co
+              WHERE co.Customer_ID = c.Customer_ID) AS complaints,
+            (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
+              WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
+            (SELECT COUNT(DISTINCT s."شماره فاکتور") FROM sales s
+              WHERE s.Customer_ID = c.Customer_ID) AS orders,
+            (SELECT COALESCE(SUM(s."مبلغ کل"), 0) FROM sales s
+              WHERE s.Customer_ID = c.Customer_ID) AS revenue,
+            (SELECT COUNT(*) FROM collections col
+              WHERE col.Customer_ID = c.Customer_ID
+                AND col."چک برگشتی" = 'بله') AS bounced
+          FROM customers c
+        )
+        SELECT Customer_ID, complaints, orders, revenue, last_purchase,
+               CAST({ref_lit} - last_purchase AS INT) AS days_since,
+               bounced,
+               CAST(LEAST(99,
+                 12
+                 + LEAST(45, complaints * 8)
+                 + CASE WHEN last_purchase IS NULL THEN 40
+                        WHEN last_purchase < {ref_lit} - INTERVAL 365 DAY THEN 20
+                        WHEN last_purchase < {ref_lit} - INTERVAL 180 DAY THEN 10
+                        ELSE 0 END
+                 + CASE WHEN orders = 0 THEN 25 ELSE 0 END
+                 + LEAST(15, bounced * 10)
+               ) AS INT) AS risk_score
+        FROM agg
+        ORDER BY risk_score DESC, Customer_ID
+        LIMIT 12
+    """).fetchall()
+    at_risk_count = len(at_rows)
+    at_risk_revenue = sum(r[3] or 0 for r in at_rows)
+
+    themes = con.execute("""
+        SELECT Complaint_Title, COUNT(*) AS v
+        FROM complaints GROUP BY 1 ORDER BY v DESC LIMIT 6
+    """).fetchall()
+
+    offers = con.execute("""
+        SELECT Offer_Type,
+               COUNT(*) AS n,
+               SUM(CASE WHEN Result = 'قبول' THEN 1 ELSE 0 END) AS accepted
+        FROM offers GROUP BY 1
+        HAVING COUNT(*) >= 5
+        ORDER BY accepted * 1.0 / COUNT(*) DESC
+    """).fetchall()
+    offer_eff = [
+        {"type": t, "rate": (a / n) if n else 0, "count": n}
+        for t, n, a in offers
+    ]
+
+    overdue = con.execute("""
+        SELECT COALESCE(SUM("مبلغ وصول"), 0),
+               COUNT(*) FILTER (WHERE "چک برگشتی" = 'بله')
+        FROM collections WHERE "روز تأخیر" > 0
+    """).fetchone()
+
+    winback = con.execute(f"""
+        WITH agg AS (
+          SELECT c.Customer_ID,
+            (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
+              WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
+            (SELECT COALESCE(SUM(s."مبلغ کل"), 0) FROM sales s
+              WHERE s.Customer_ID = c.Customer_ID) AS revenue
+          FROM customers c
+        )
+        SELECT COUNT(*), COALESCE(SUM(revenue), 0)
+        FROM agg
+        WHERE last_purchase IS NOT NULL
+          AND last_purchase < {ref_lit} - INTERVAL 365 DAY
+    """).fetchone()
+
+    seg_rev = con.execute("""
+        SELECT COALESCE(c.Customer_Segment, 'نامشخص'),
+               COALESCE(SUM(s."مبلغ کل"), 0) AS v
+        FROM customers c
+        LEFT JOIN sales s ON c.Customer_ID = s.Customer_ID
+        GROUP BY 1 ORDER BY v DESC
+    """).fetchall()
+
+    return {
+        "at_risk": {
+            "count": at_risk_count,
+            "revenue": round(at_risk_revenue),
+            "top": [
+                {
+                    "customer_id": r[0],
+                    "complaints": r[1],
+                    "orders": r[2],
+                    "revenue": round(r[3] or 0),
+                    "last_purchase": r[4],
+                    "days_since": r[5],
+                    "bounced": r[6],
+                    "risk_score": r[7],
+                }
+                for r in at_rows
+            ],
+        },
+        "complaint_themes": [
+            {"name": t, "count": c} for t, c in themes
+        ],
+        "offer_effectiveness": offer_eff,
+        "collection_risk": {
+            "overdue": round(overdue[0] or 0),
+            "bounced": overdue[1] or 0,
+        },
+        "winback": {
+            "count": winback[0] or 0,
+            "revenue": round(winback[1] or 0),
+        },
+        "segment_share": [
+            {"name": s, "value": round(v)} for s, v in seg_rev
+        ],
+    }
+
+
+def _income_recommendations(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    """Deterministic recommendations for better income, in plain Persian.
+    Every item is computed from real data; nothing is invented."""
+    intel = _dashboard_intelligence(con)
+    recs: list[dict[str, Any]] = []
+    at = intel["at_risk"]
+    if at["count"]:
+        recs.append({
+            "id": "retain-at-risk",
+            "tone": "negative",
+            "title": "حفظ مشتریان در معرض از دست رفتن",
+            "detail": (
+                f"{at['count']} مشتری با مجموع درآمد {at['revenue']:,.0f} تومان "
+                "در وضعیت نگران‌کننده‌اند؛ پیگیری تلفنی و رسیدگی به شکایت‌های باز "
+                "اولویت اول است."),
+            "impact": at["revenue"],
+        })
+    wb = intel["winback"]
+    if wb["count"]:
+        recs.append({
+            "id": "winback",
+            "tone": "positive",
+            "title": "بازگرداندن مشتریان قدیمی",
+            "detail": (
+                f"{wb['count']} مشتری ارزشمند بیش از یک سال است خریدی نداشته‌اند "
+                f"(مجموع درآمد سابق {wb['revenue']:,.0f} تومان)؛ یک پیشنهاد ویژه "
+                "می‌تواند آن‌ها را برگرداند."),
+            "impact": wb["revenue"],
+        })
+    if intel["complaint_themes"]:
+        t = intel["complaint_themes"][0]
+        recs.append({
+            "id": "complaint-theme",
+            "tone": "warning",
+            "title": f"رسیدگی به «{t['name']}»",
+            "detail": (
+                f"این موضوع با {t['count']} شکایت پرتکرارترین مشکل است؛ رفع آن "
+                "ریشه‌ای، جلوی از دست رفتن فروش را می‌گیرد."),
+            "impact": 0,
+        })
+    if intel["offer_effectiveness"]:
+        best = intel["offer_effectiveness"][0]
+        recs.append({
+            "id": "offer-type",
+            "tone": "positive",
+            "title": "تمرکز پیشنهادها روی نوع مؤثر",
+            "detail": (
+                f"پیشنهادهای «{best['type']}» بالاترین پذیرش را دارند "
+                f"({round(best['rate'] * 100)}٪ از {best['count']} پیشنهاد)؛ "
+                "تخصیص تخفیف به همین نوع، بازدهی بیشتری دارد."),
+            "impact": 0,
+        })
+    col = intel["collection_risk"]
+    if col["overdue"] or col["bounced"]:
+        recs.append({
+            "id": "collection",
+            "tone": "warning",
+            "title": "وصول مطالبات عقب‌افتاده",
+            "detail": (
+                f"{col['overdue']:,.0f} تومان مطالبات با تأخیر و "
+                f"{col['bounced']} چک برگشتی ثبت شده؛ پیگیری وصول نقدینگی را "
+                "افزایش می‌دهد."),
+            "impact": col["overdue"],
+        })
+    return recs
+
+
+def analyses() -> dict[str, Any]:
+    """Real, computed payloads for the Analyses page (no LLM involved)."""
+    con = _connect()
+    try:
+        ref = date_ref()
+        ref_lit = f"DATE '{ref.isoformat()}'"
+
+        at_rows = con.execute(f"""
+            WITH agg AS (
+              SELECT c.Customer_ID, c.Customer_Segment, c.Customer_Status,
+                (SELECT COUNT(*) FROM complaints co
+                  WHERE co.Customer_ID = c.Customer_ID) AS complaints,
+                (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
+                  WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
+                (SELECT COUNT(DISTINCT s."شماره فاکتور") FROM sales s
+                  WHERE s.Customer_ID = c.Customer_ID) AS orders,
+                (SELECT COALESCE(SUM(s."مبلغ کل"), 0) FROM sales s
+                  WHERE s.Customer_ID = c.Customer_ID) AS revenue,
+                (SELECT COUNT(*) FROM collections col
+                  WHERE col.Customer_ID = c.Customer_ID
+                    AND col."چک برگشتی" = 'بله') AS bounced
+              FROM customers c
+            )
+            SELECT Customer_ID, Customer_Segment, Customer_Status, complaints,
+                   orders, revenue, last_purchase,
+                   CAST({ref_lit} - last_purchase AS INT) AS days_since,
+                   bounced,
+                   CAST(LEAST(99,
+                     12
+                     + LEAST(45, complaints * 8)
+                     + CASE WHEN last_purchase IS NULL THEN 40
+                            WHEN last_purchase < {ref_lit} - INTERVAL 365 DAY THEN 20
+                            WHEN last_purchase < {ref_lit} - INTERVAL 180 DAY THEN 10
+                            ELSE 0 END
+                     + CASE WHEN orders = 0 THEN 25 ELSE 0 END
+                     + LEAST(15, bounced * 10)
+                   ) AS INT) AS risk_score
+            FROM agg
+            ORDER BY risk_score DESC, Customer_ID
+            LIMIT 15
+        """).fetchall()
+        at_risk = [
+            {
+                "customer": r[0],
+                "segment": r[1],
+                "status": r[2],
+                "complaints": r[3],
+                "orders": r[4],
+                "revenue": round(r[5] or 0),
+                "last_purchase": r[6],
+                "days_since": r[7],
+                "bounced": r[8],
+                "risk_level": "زیاد" if r[9] >= 65 else ("متوسط" if r[9] >= 35 else "کم"),
+            }
+            for r in at_rows
+        ]
+
+        themes = con.execute("""
+            SELECT Complaint_Title, COUNT(*) AS v
+            FROM complaints GROUP BY 1 ORDER BY v DESC LIMIT 8
+        """).fetchall()
+        complaint_themes = [
+            {"name": t, "count": c} for t, c in themes
+        ]
+
+        seg_rev = con.execute("""
+            SELECT COALESCE(c.Customer_Segment, 'نامشخص'),
+                   COALESCE(SUM(s."مبلغ کل"), 0) AS v,
+                   COUNT(DISTINCT c.Customer_ID) AS n
+            FROM customers c
+            LEFT JOIN sales s ON c.Customer_ID = s.Customer_ID
+            GROUP BY 1 ORDER BY v DESC
+        """).fetchall()
+        revenue_concentration = [
+            {"name": s, "value": round(v), "customers": n}
+            for s, v, n in seg_rev
+        ]
+
+        inactive = con.execute(f"""
+            WITH agg AS (
+              SELECT c.Customer_ID,
+                (SELECT MAX(CAST(s."تاریخ" AS DATE)) FROM sales s
+                  WHERE s.Customer_ID = c.Customer_ID) AS last_purchase,
+                (SELECT COUNT(*) FROM complaints co
+                  WHERE co.Customer_ID = c.Customer_ID) AS complaints
+              FROM customers c
+            )
+            SELECT
+              COUNT(*) FILTER (WHERE last_purchase IS NULL) AS never,
+              COUNT(*) FILTER (WHERE last_purchase < {ref_lit} - INTERVAL 180 DAY
+                               AND last_purchase >= {ref_lit} - INTERVAL 365 DAY) AS d180,
+              COUNT(*) FILTER (WHERE last_purchase < {ref_lit} - INTERVAL 365 DAY) AS d365,
+              COUNT(*) FILTER (WHERE last_purchase < {ref_lit} - INTERVAL 180 DAY
+                               AND complaints > 0) AS inactive_with_complaints
+            FROM agg
+        """).fetchone()
+        churn_factors = {
+            "never_bought": inactive[0] or 0,
+            "inactive_180_365": inactive[1] or 0,
+            "inactive_over_365": inactive[2] or 0,
+            "inactive_with_complaints": inactive[3] or 0,
+        }
+
+        return {
+            "atRisk": at_risk,
+            "complaintThemes": complaint_themes,
+            "revenueConcentration": revenue_concentration,
+            "churnFactors": churn_factors,
+            "incomeRecommendations": _income_recommendations(con),
         }
     finally:
         con.close()
@@ -139,15 +449,115 @@ def customers() -> list[dict[str, Any]]:
         con.close()
 
 
+def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> list[str]:
+    return [d[0] for d in con.execute(f"DESCRIBE {table}").fetchall()]
+
+
+def _signal_fa(sig_id: str) -> str:
+    return {
+        "profit": "سودآوری",
+        "purchase_trend": "روند خرید",
+        "payment_behavior": "رفتار پرداخت",
+        "share_of_wallet": "سهم از خرید مشتری",
+        "purchase_cycle": "چرخه خرید",
+        "margin_trend": "روند حاشیه سود",
+        "offer_affinity": "پاسخ به پیشنهادها",
+        "complaint_impact": "اثر شکایات",
+        "dev_request": "درخواست‌های توسعه",
+        "growth_potential": "پتانسیل رشد",
+        "churn_risk": "ریسک از دست دادن مشتری",
+    }.get(sig_id, sig_id)
+
+
+def _signal_tone(status: str) -> str:
+    return {
+        "critical": "negative",
+        "warning": "neutral",
+        "positive": "positive",
+        "neutral": "neutral",
+        "low": "positive",
+        "high": "negative",
+        "unknown": "neutral",
+    }.get(status, "neutral")
+
+
+def _signal_detail(sig_id: str, status: str) -> str:
+    fa = {
+        "critical": "بحرانی",
+        "warning": "هشدار",
+        "positive": "مثبت",
+        "neutral": "خنثی",
+        "low": "کم",
+        "high": "بالا",
+        "unknown": "نامشخص",
+    }
+    return f"وضعیت: {fa.get(status, status)}"
+
+
+def _level_from_status(status: str) -> str:
+    return {
+        "critical": "زیاد",
+        "high": "زیاد",
+        "warning": "متوسط",
+        "neutral": "متوسط",
+        "low": "کم",
+        "unknown": "متوسط",
+    }.get(status, "متوسط")
+
+
+def _customer_fingerprint(con: duckdb.DuckDBPyConnection,
+                          customer_id: str) -> str:
+    """Cheap per-customer data fingerprint: row counts + newest dates of the
+    tables that feed the 360 view. The deterministic payload is cached under
+    this fingerprint so repeat visits read instantly and the cache invalidates
+    automatically when the underlying data changes."""
+    from backend.crm import cache as store
+    row = con.execute("""
+        SELECT
+          (SELECT COUNT(*) FROM sales s WHERE s.Customer_ID = ?),
+          (SELECT COUNT(*) FROM complaints c WHERE c.Customer_ID = ?),
+          (SELECT COUNT(*) FROM crm_interactions i WHERE i.Customer_ID = ?),
+          (SELECT COUNT(*) FROM dev_requests d WHERE d.Customer_ID = ?),
+          (SELECT COUNT(*) FROM offers o WHERE o.Customer_ID = ?),
+          (SELECT COUNT(*) FROM collections col WHERE col.Customer_ID = ?),
+          (SELECT COUNT(*) FROM market_signals m WHERE m.Customer_ID = ?),
+          (SELECT COALESCE(MAX(s."تاریخ"),'') FROM sales s WHERE s.Customer_ID = ?),
+          (SELECT COALESCE(MAX(c.Created_At),'') FROM complaints c WHERE c.Customer_ID = ?),
+          (SELECT COALESCE(MAX(i.Event_Time),'') FROM crm_interactions i WHERE i.Customer_ID = ?)
+    """, [customer_id] * 10).fetchone()
+    return store.fingerprint(row)
+
+
 def customer_360(customer_id: str) -> dict[str, Any] | None:
+    """Full customer-360 payload (all dataset sections + cached LLM summary).
+    The deterministic part is cached per customer under a data fingerprint, so
+    the first visit computes it and every later visit reads it instantly."""
+    from backend.crm import cache as store
+    con = _connect()
+    try:
+        if not con.execute(
+                "SELECT 1 FROM customers WHERE Customer_ID = ?",
+                [customer_id]).fetchone():
+            return None
+        fp = _customer_fingerprint(con, customer_id)
+    finally:
+        con.close()
+
+    def compute() -> dict[str, Any]:
+        return _customer_360_compute(customer_id)
+
+    return store.cached("customer360_data", customer_id, compute, fp)
+
+
+def _customer_360_compute(customer_id: str) -> dict[str, Any]:
     con = _connect()
     try:
         base = con.execute(
             "SELECT * FROM customers WHERE Customer_ID = ?", [customer_id]
         ).fetchall()
         if not base:
-            return None
-        cols = [d[0] for d in con.execute("DESCRIBE customers").fetchall()]
+            return {"customer": {}}
+        cols = _table_columns(con, "customers")
         cust = dict(zip(cols, base[0]))
 
         rev_agg = con.execute("""
@@ -167,6 +577,9 @@ def customer_360(customer_id: str) -> dict[str, Any] | None:
         cm_count = con.execute(
             "SELECT COUNT(*) FROM complaints WHERE Customer_ID = ?",
             [customer_id]).fetchone()[0]
+        cm_unresolved = con.execute(
+            "SELECT COUNT(*) FROM complaints WHERE Customer_ID = ? AND Complaint_Status != 'بسته‌شده'",
+            [customer_id]).fetchone()[0]
         cm_reasons = con.execute("""
             SELECT Complaint_Title, COUNT(*) AS v
             FROM complaints WHERE Customer_ID = ?
@@ -182,95 +595,235 @@ def customer_360(customer_id: str) -> dict[str, Any] | None:
 
         avg_order_value = round(revenue / orders) if orders else 0
 
-        # --- deterministic risk model (computed from real data) ---
-        risk_signals: list[dict[str, Any]] = []
-        if cm_count >= 5:
-            risk_signals.append({
-                "label": "حجم شکایت", "tone": "negative",
-                "detail": f"{cm_count} شکایت ثبت شده"})
-        elif cm_count >= 3:
-            risk_signals.append({
-                "label": "شکایت", "tone": "neutral",
-                "detail": f"{cm_count} شکایت ثبت شده"})
-        else:
-            risk_signals.append({
-                "label": "شکایت کم", "tone": "positive",
-                "detail": f"فقط {cm_count} شکایت"})
+        # ---- deterministic engine: signals / state / reasons / actions ----
+        from backend.crm.service import service
+        ci = service.get_intelligence(customer_id)
+        engine_signals = [
+            {
+                "id": sig_id,
+                "label": _signal_fa(sig_id),
+                "tone": _signal_tone(s.status),
+                "detail": _signal_detail(sig_id, s.status),
+                "reasons": s.reasons[:2],
+            }
+            for sig_id, s in ci.signals.items()
+            if s is not None
+        ]
+        risk_level = _level_from_status(
+            ci.state.churn_risk.status if ci.state else "unknown")
+        actions = [
+            {
+                "id": a.action_id,
+                "name": a.name,
+                "reason": a.reason,
+                "evidence": a.evidence[:2],
+                "next_step": a.suggested_next_step,
+            }
+            for a in ci.next_best_actions[:6]
+        ]
+        state_dims = {}
+        if ci.state:
+            for dim in ("value", "churn_risk", "growth_opportunity",
+                        "relationship_health", "profitability", "payment_risk"):
+                d = getattr(ci.state, dim)
+                state_dims[dim] = {
+                    "status": d.status,
+                    "reasons": d.reasons[:2],
+                }
 
-        import datetime as _dt
-        days_since = None
-        if last_purchase:
-            try:
-                days_since = (date_ref() - _dt.date.fromisoformat(last_purchase[:10])).days
-            except Exception:  # noqa: BLE001
-                days_since = None
-        if days_since is not None and days_since > 365:
-            risk_signals.append({
-                "label": "فاصله خرید", "tone": "negative",
-                "detail": f"آخرین خرید {days_since} روز پیش"})
-        elif days_since is not None and days_since > 180:
-            risk_signals.append({
-                "label": "فاصله خرید", "tone": "neutral",
-                "detail": f"آخرین خرید {days_since} روز پیش"})
-        elif days_since is not None:
-            risk_signals.append({
-                "label": "فاصله خرید", "tone": "positive",
-                "detail": f"آخرین خرید {days_since} روز پیش"})
+        # ---- list sections (minimal previews served; UI expands) ----
+        complaints_rows = con.execute("""
+            SELECT Complaint_ID, Created_At, Complaint_Title, Complaint_Text,
+                   Severity, Complaint_Status, Product_ID
+            FROM complaints WHERE Customer_ID = ? AND Complaint_ID IS NOT NULL
+            ORDER BY Created_At DESC LIMIT 100
+        """, [customer_id]).fetchall()
+        complaints = [
+            {
+                "id": r[0],
+                "date": r[1],
+                "title": r[2],
+                "text": r[3],
+                "severity": r[4],
+                "status": r[5],
+                "product": r[6],
+            }
+            for r in complaints_rows
+        ]
 
-        if orders >= 50:
-            risk_signals.append({
-                "label": "حجم سفارش", "tone": "positive",
-                "detail": f"{orders} سفارش ثبت شده"})
-        elif orders == 0:
-            risk_signals.append({
-                "label": "بدون سفارش", "tone": "negative",
-                "detail": "هنوز سفارشی ثبت نشده است"})
+        interactions_rows = con.execute("""
+            SELECT Interaction_ID, Event_Time, Interaction_Type, Summary_Text,
+                   Next_Action, Sales_Rep_ID
+            FROM crm_interactions WHERE Customer_ID = ?
+            ORDER BY Event_Time DESC LIMIT 100
+        """, [customer_id]).fetchall()
+        interactions = [
+            {
+                "id": r[0],
+                "date": r[1],
+                "type": r[2],
+                "summary": r[3],
+                "next_action": r[4],
+                "rep": r[5],
+            }
+            for r in interactions_rows
+        ]
 
-        # risk score 0-100
-        score = 12
-        score += min(45, cm_count * 8)
-        if days_since is not None:
-            if days_since > 365:
-                score += 20
-            elif days_since > 180:
-                score += 10
-        if orders == 0:
-            score += 25
-        risk_score = min(99, score)
+        tx_rows = con.execute("""
+            SELECT "شماره فاکتور", MAX("تاریخ") AS d, SUM("مبلغ کل") AS v,
+                   COUNT(*) AS lines
+            FROM sales WHERE Customer_ID = ?
+            GROUP BY 1 ORDER BY d DESC LIMIT 50
+        """, [customer_id]).fetchall()
+        transactions = [
+            {
+                "invoice": r[0],
+                "date": r[1],
+                "amount": r[2] or 0,
+                "lines": r[3],
+            }
+            for r in tx_rows
+        ]
 
-        risk_level = "کم" if risk_score < 35 else ("متوسط" if risk_score < 65 else "زیاد")
+        dev_rows = con.execute("""
+            SELECT Request_ID, Created_At, Request_Type, Requirement_Text,
+                   Status, Owner_Unit
+            FROM dev_requests WHERE Customer_ID = ?
+            ORDER BY Created_At DESC LIMIT 100
+        """, [customer_id]).fetchall()
+        dev_requests = [
+            {
+                "id": r[0],
+                "date": r[1],
+                "type": r[2],
+                "text": r[3],
+                "status": r[4],
+                "owner": r[5],
+            }
+            for r in dev_rows
+        ]
+        dev_open = sum(1 for d in dev_requests if d["status"] not in ("بسته‌شده", "انجام‌شده"))
 
-        # Persian summary built from real numbers
-        parts = [f"مشتری {customer_id}"]
-        if revenue:
-            parts.append(f"با درآمد کل {revenue:,.0f}")
-        if orders:
-            parts.append(f"و {orders} سفارش")
-        parts.append("در پایگاه‌داده است.")
-        summary = " ".join(parts)
-        if cm_count:
-            summary += (f" {cm_count} شکایت ثبت شده و"
-                        f" ریسک فعلی {risk_level} ارزیابی می‌شود.")
-        else:
-            summary += f" بدون شکایت و ریسک فعلی {risk_level}."
+        offer_rows = con.execute("""
+            SELECT Offer_ID, Offer_Date, Offer_Type, Offer_Discount_Pct,
+                   Result, Product_ID
+            FROM offers WHERE Customer_ID = ?
+            ORDER BY Offer_Date DESC LIMIT 100
+        """, [customer_id]).fetchall()
+        offers = [
+            {
+                "id": r[0],
+                "date": r[1],
+                "type": r[2],
+                "discount_pct": r[3],
+                "result": r[4],
+                "product": r[5],
+            }
+            for r in offer_rows
+        ]
+        offer_accepted = sum(1 for o in offers if o["result"] == "قبول")
+        offer_acceptance = (offer_accepted / len(offers)) if offers else None
+        best_offer = con.execute("""
+            SELECT Offer_Type, COUNT(*) AS n,
+                   SUM(CASE WHEN Result = 'قبول' THEN 1 ELSE 0 END) AS accepted
+            FROM offers WHERE Customer_ID = ?
+            GROUP BY 1 ORDER BY accepted * 1.0 / COUNT(*) DESC LIMIT 1
+        """, [customer_id]).fetchone()
+        best_offer_type = best_offer[0] if best_offer else None
+
+        coll_rows = con.execute("""
+            SELECT Collection_ID, "تاریخ رویداد وصول", "مبلغ وصول", "روز تأخیر",
+                   "چک برگشتی"
+            FROM collections WHERE Customer_ID = ?
+            ORDER BY "تاریخ رویداد وصول" DESC LIMIT 50
+        """, [customer_id]).fetchall()
+        collections = [
+            {
+                "id": r[0],
+                "date": r[1],
+                "amount": r[2] or 0,
+                "delay_days": r[3],
+                "bounced": r[4],
+            }
+            for r in coll_rows
+        ]
+
+        market_rows = con.execute("""
+            SELECT Report_Date, Product_Market, Competitor, Customer_Signal,
+                   Demand_Change, Market_Trend
+            FROM market_signals WHERE Customer_ID = ?
+            ORDER BY Report_Date DESC LIMIT 50
+        """, [customer_id]).fetchall()
+        market_signals = [
+            {
+                "date": r[0],
+                "market": r[1],
+                "competitor": r[2],
+                "customer_signal": r[3],
+                "demand": r[4],
+                "trend": r[5],
+            }
+            for r in market_rows
+        ]
+
+        interactions_count = con.execute(
+            "SELECT COUNT(*) FROM crm_interactions WHERE Customer_ID = ?",
+            [customer_id]).fetchone()[0] or 0
+        dev_count = len(dev_requests)
+
+        overdue_amount = con.execute("""
+            SELECT COALESCE(SUM("مبلغ وصول"), 0) FROM collections
+            WHERE Customer_ID = ? AND "روز تأخیر" > 0
+        """, [customer_id]).fetchone()[0] or 0
+        bounced_checks = con.execute("""
+            SELECT COUNT(*) FROM collections
+            WHERE Customer_ID = ? AND "چک برگشتی" = 'بله'
+        """, [customer_id]).fetchone()[0] or 0
+
+        # ---- cached LLM summary (fast path when already generated) ----
+        from backend.crm import cache as store
+        summary_entry = store.load("customer360", customer_id)
+        summary = None
+        summary_ready = False
+        if summary_entry is not None:
+            summary = summary_entry["value"]
+            summary_ready = True
 
         return {
             "customer": cust,
             "summary": summary,
-            "riskScore": risk_score,
+            "summaryReady": summary_ready,
+            "riskScore": ci.state.churn_risk.score if ci.state else None,
             "riskLevel": risk_level,
-            "riskSignals": risk_signals,
+            "riskSignals": engine_signals,
+            "state": state_dims,
+            "actions": actions,
             "orders": orders,
             "revenue": revenue,
             "avgOrderValue": avg_order_value,
             "lastPurchase": last_purchase,
             "topProduct": top_prod[0] if top_prod else None,
             "complaints": cm_count,
+            "unresolvedComplaints": cm_unresolved,
             "complaintReasons": [
                 {"reason": r, "count": c} for r, c in cm_reasons
             ],
+            "complaintList": complaints,
+            "interactions": interactions,
+            "interactionsCount": interactions_count,
+            "transactions": transactions,
+            "devRequests": dev_requests,
+            "devCount": dev_count,
+            "devOpen": dev_open,
+            "offers": offers,
+            "offerAcceptance": offer_acceptance,
+            "bestOfferType": best_offer_type,
+            "collections": collections,
             "collectionsCount": coll_count,
             "collectionsAmount": coll_amount,
+            "overdueAmount": overdue_amount,
+            "bouncedChecks": bounced_checks,
+            "marketSignals": market_signals,
         }
     finally:
         con.close()

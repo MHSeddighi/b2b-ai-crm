@@ -17,6 +17,7 @@ venv/
 data/raw/*
 data/processed/*
 data/demo/*
+data/cache/*
 
 # ML artifacts
 ml/artifacts/*

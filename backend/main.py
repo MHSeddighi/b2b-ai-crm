@@ -82,6 +82,20 @@ async def dashboard() -> dict[str, Any]:
     return api_data.dashboard()
 
 
+@app.get("/api/analyses")
+async def analyses() -> dict[str, Any]:
+    """Real, computed analyses for the Analyses page (no LLM)."""
+    return api_data.analyses()
+
+
+@app.get("/api/dashboard/intelligence")
+async def dashboard_intelligence() -> dict[str, Any]:
+    """LLM portfolio summary for the dashboard (cached; poll while generating)."""
+    from backend.agents import intel_summary
+    det = api_data.dashboard()
+    return await intel_summary.dashboard_summary(det)
+
+
 @app.get("/api/customers")
 async def customers() -> dict[str, Any]:
     return {"customers": api_data.customers()}
@@ -90,6 +104,16 @@ async def customers() -> dict[str, Any]:
 @app.get("/api/customers/{customer_id}/360")
 async def customer_360(customer_id: str) -> dict[str, Any] | None:
     return api_data.customer_360(customer_id)
+
+
+@app.get("/api/customers/{customer_id}/360/summary")
+async def customer_360_summary(customer_id: str) -> dict[str, Any]:
+    """LLM intelligence summary for one customer (cached; poll while generating)."""
+    from backend.agents import intel_summary
+    payload = api_data.customer_360(customer_id)
+    if payload is None:
+        return {"status": "not_found", "summary": None, "generated": False}
+    return await intel_summary.customer_summary(payload)
 
 
 # --- Deterministic Customer Intelligence (Signal -> State -> Action) ---
