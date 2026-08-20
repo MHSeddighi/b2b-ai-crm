@@ -488,7 +488,7 @@ export function Dashboard() {
           </SectionCard>
         </div>
 
-        <div className="xl:col-span-5">
+        <div className="xl:col-span-6">
           <SectionCard
             icon={MessageSquareWarning}
             title="موضوع‌های پرتکرار شکایت"
@@ -512,7 +512,7 @@ export function Dashboard() {
           </SectionCard>
         </div>
 
-        <div className="xl:col-span-5">
+        <div className="xl:col-span-6">
           <SectionCard
             icon={Target}
             title="اثربخشی پیشنهادها"
@@ -541,7 +541,7 @@ export function Dashboard() {
           </SectionCard>
         </div>
 
-        <div className="xl:col-span-7">
+        <div className="xl:col-span-5">
           <SectionCard
             icon={Landmark}
             title="مطالبات، چک‌های برگشتی و مشتریان قدیمی"
