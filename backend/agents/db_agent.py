@@ -823,12 +823,52 @@ async def _call_query(session: ClientSession, sql: str) -> dict[str, Any]:
     return json.loads(text)
 
 
+# Time budgets. Without these a single slow/hung tool call blocks the SSE
+# stream indefinitely: the browser hits its own hard cap (240s in
+# frontend/src/lib/chat-api.ts) and aborts, so the user loses the whole answer
+# — including everything already gathered — and just sees "connection lost".
+# Bounding each call, and the answer as a whole, turns that into a partial but
+# delivered answer instead.
+CRM_TOOL_TIMEOUT_S = 25.0
+SQL_TIMEOUT_S = 60.0
+# Keep the total comfortably under the frontend's hard abort so there is time
+# left to compose and stream the narrative.
+ANSWER_BUDGET_S = 150.0
+
+
+class _Deadline:
+    """Wall-clock budget for one answer."""
+
+    def __init__(self, seconds: float = ANSWER_BUDGET_S) -> None:
+        self.started = time.monotonic()
+        self.seconds = seconds
+
+    @property
+    def remaining(self) -> float:
+        return self.seconds - (time.monotonic() - self.started)
+
+    @property
+    def expired(self) -> bool:
+        return self.remaining <= 0
+
+
 async def _call_crm_tool(session: ClientSession, tool: str,
                          args: dict[str, Any],
-                         trace: Trace | None = None) -> dict[str, Any]:
-    """Invoke a deterministic CRM tool and parse its JSON result."""
+                         trace: Trace | None = None,
+                         timeout: float = CRM_TOOL_TIMEOUT_S) -> dict[str, Any]:
+    """Invoke a deterministic CRM tool and parse its JSON result.
+
+    Bounded by ``timeout``: a tool that never returns raises TimeoutError here
+    instead of stalling the whole answer.
+    """
     t0 = time.monotonic()
-    response = await session.call_tool(tool, args)
+    try:
+        response = await asyncio.wait_for(session.call_tool(tool, args), timeout)
+    except (asyncio.TimeoutError, TimeoutError):
+        if trace is not None:
+            trace.tool(tool, args, {"error": "timeout"},
+                       int((time.monotonic() - t0) * 1000), ok=False)
+        raise
     text = "".join(
         getattr(item, "text", "") or ""
         for item in response.content
@@ -850,6 +890,7 @@ MAX_ACTION_PLANS = 10
 async def _auto_chain_action_plans(
     crm_results: dict[str, Any],
     trace: Trace | None = None,
+    deadline: "_Deadline | None" = None,
 ) -> list[str]:
     """Deterministically fetch action plans for customers the plan touched.
 
@@ -878,8 +919,9 @@ async def _auto_chain_action_plans(
     ids = ids[:MAX_ACTION_PLANS]
     if not ids:
         return []
-    chained: list[str] = []
     session = await _ensure_mcp()
+
+    pending: list[str] = []
     for cid in ids:
         plan_key = f"action_plan:{cid}"
         direct_key = f"get_customer_action_plan:{cid}"
@@ -890,13 +932,43 @@ async def _auto_chain_action_plans(
         if direct_key in crm_results:
             crm_results[plan_key] = crm_results[direct_key]
             continue
+        pending.append(cid)
+
+    if not pending:
+        return []
+
+    # Fetched concurrently and under a shared budget: sequentially this was
+    # N x tool-latency, so one slow customer used to push the whole answer past
+    # the browser's abort. Whatever lands in time is used; the rest is dropped.
+    async def fetch(cid: str) -> tuple[str, dict[str, Any] | None]:
         try:
-            plan = await _call_crm_tool(
-                session, "get_customer_action_plan", {"customer_id": cid}, trace)
+            return cid, await _call_crm_tool(
+                session, "get_customer_action_plan", {"customer_id": cid}, trace,
+                timeout=CRM_TOOL_TIMEOUT_S,
+            )
         except Exception:  # noqa: BLE001 - action plans are an enhancement
+            return cid, None
+
+    budget = deadline.remaining if deadline is not None else CRM_TOOL_TIMEOUT_S * 2
+    tasks = [asyncio.create_task(fetch(cid)) for cid in pending]
+    # asyncio.wait (not wait_for/gather) so that when the budget runs out we
+    # still KEEP the plans that already came back — cancelling the stragglers
+    # instead of discarding completed work along with them.
+    done, still_running = await asyncio.wait(
+        tasks, timeout=max(budget, 0.0), return_when=asyncio.ALL_COMPLETED
+    )
+    for task in still_running:
+        task.cancel()
+
+    chained: list[str] = []
+    for task in done:
+        try:
+            cid, plan = task.result()
+        except Exception:  # noqa: BLE001 - a failed plan is simply skipped
             continue
-        crm_results[plan_key] = plan
-        chained.append(cid)
+        if plan is not None:
+            crm_results[f"action_plan:{cid}"] = plan
+            chained.append(cid)
     return chained
 
 
@@ -909,11 +981,19 @@ async def _run_sql(sql: str) -> dict[str, Any]:
     """
     session = await _ensure_mcp()
     try:
-        return await _call_query(session, sql)
+        return await asyncio.wait_for(_call_query(session, sql), SQL_TIMEOUT_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        # A query that never returns must surface as a normal error result, not
+        # hang the stream until the browser gives up on the whole answer.
+        await _restart_mcp()
+        return {"error": f"query timed out after {SQL_TIMEOUT_S:.0f}s"}
     except Exception:
         await _restart_mcp()
         session = await _ensure_mcp()
-        return await _call_query(session, sql)
+        try:
+            return await asyncio.wait_for(_call_query(session, sql), SQL_TIMEOUT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            return {"error": f"query timed out after {SQL_TIMEOUT_S:.0f}s"}
 
 
 _SQL_FIX_SYSTEM = f"""You fix a failing DuckDB SQL query.
@@ -2023,6 +2103,7 @@ async def _database_answer_stream(
     trace: Trace | None = None,
 ) -> Any:
     """Yield SSE-style event dicts for the full database-backed answer."""
+    deadline = _Deadline()
     if trace is not None:
         trace.meta(session_id=ctx.session_id, question=question)
         trace.stage("planning", "شروع تحلیل سؤال")
@@ -2084,6 +2165,15 @@ async def _database_answer_stream(
 
     for step in steps:
         kind = step["kind"]
+
+        # Out of budget: stop gathering and answer with what we already have.
+        # A partial answer beats the browser aborting and showing nothing.
+        if deadline.expired and (results or crm_results):
+            yield {
+                "type": "thinking",
+                "text": "بررسی طولانی شد؛ با همین داده‌های به‌دست‌آمده پاسخ را آماده می‌کنم…",
+            }
+            break
 
         if kind == "reuse":
             result_id = step["resultId"]
@@ -2180,7 +2270,7 @@ async def _database_answer_stream(
         for ev in trace.drain():
             yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
     try:
-        await _auto_chain_action_plans(crm_results, trace)
+        await _auto_chain_action_plans(crm_results, trace, deadline)
     except Exception:  # noqa: BLE001 - chaining is an enhancement, never fatal
         pass
     if trace is not None:
