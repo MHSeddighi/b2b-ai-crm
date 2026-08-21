@@ -52,10 +52,15 @@ export function Deck({ fullscreen = false, onExit }: DeckProps) {
       ) {
         return;
       }
-      if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") {
+      if (
+        e.key === "ArrowRight" ||
+        e.key === "ArrowDown" ||
+        e.key === "PageDown" ||
+        e.key === " "
+      ) {
         e.preventDefault();
         go(current + 1);
-      } else if (e.key === "ArrowLeft" || e.key === "PageUp") {
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "PageUp") {
         e.preventDefault();
         go(current - 1);
       } else if (e.key === "Home") {
@@ -119,8 +124,11 @@ export function Deck({ fullscreen = false, onExit }: DeckProps) {
 
       {/* controls */}
       <div className="flex shrink-0 items-center justify-between gap-4 px-6 py-4 md:px-12">
-        <span className="font-mono text-xs tabular-nums text-muted-foreground">
+        <span className="flex items-center gap-2 font-mono text-xs tabular-nums text-muted-foreground">
           {String(current + 1).padStart(2, "0")} / {String(total).padStart(2, "0")}
+          <span className="hidden rounded-full border bg-muted/60 px-2 py-0.5 text-[10px] text-muted-foreground sm:inline">
+            ~{Math.round(PITCH_SLIDES[current].duration / 5) * 5} ثانیه
+          </span>
         </span>
 
         <div className="flex items-center gap-1.5">

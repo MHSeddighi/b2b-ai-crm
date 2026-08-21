@@ -38,6 +38,7 @@ import {
 } from "@/lib/api";
 import { formatCurrency, formatNumber, formatDate, withDot, cn } from "@/lib/utils";
 import { SectionCard } from "@/components/section-card";
+import { SummaryText } from "@/components/summary-text";
 
 const riskTone: Record<string, string> = {
   زیاد: "bg-red-500",
@@ -300,38 +301,6 @@ function MarketCard({ m }: { m: MarketSignalRecord }) {
 }
 
 /* summary renderer ----------------------------------------------------- */
-function SummaryText({ text }: { text: string }) {
-  const lines = text.split("\n").filter((l) => l.trim() !== "");
-  return (
-    <div className="space-y-2">
-      {lines.map((line, i) => {
-        const trimmed = line.trim();
-        const isHeader = /^[^\s:]{2,}:$/.test(trimmed) || trimmed.startsWith("**");
-        if (isHeader) {
-          return (
-            <p key={i} className="pt-1 text-sm font-semibold">
-              {trimmed.replace(/\*\*/g, "")}
-            </p>
-          );
-        }
-        const body = withDot(trimmed.replace(/\*\*/g, ""));
-        if (body.startsWith("- ") || body.startsWith("• ")) {
-          return (
-            <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
-              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/70" />
-              <span>{body.replace(/^[-•]\s*/, "")}</span>
-            </p>
-          );
-        }
-        return (
-          <p key={i} className="text-sm leading-relaxed text-foreground/90">
-            {body}
-          </p>
-        );
-      })}
-    </div>
-  );
-}
 
 /* loader --------------------------------------------------------------- */
 function SummaryLoader() {

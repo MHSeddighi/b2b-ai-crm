@@ -43,6 +43,7 @@ import {
 } from "@/lib/api";
 import { formatCompact, formatCurrency, formatNumber, withDot, cn } from "@/lib/utils";
 import { SectionCard } from "@/components/section-card";
+import { SummaryText } from "@/components/summary-text";
 
 const kpiIcons: Record<string, typeof Users> = {
   "کل مشتریان": Users,
@@ -104,39 +105,6 @@ function SummaryLoader() {
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div className="h-full w-1/2 animate-pulse rounded-full bg-primary/40" />
       </div>
-    </div>
-  );
-}
-
-function SummaryText({ text }: { text: string }) {
-  const lines = text.split("\n").filter((l) => l.trim() !== "");
-  return (
-    <div className="space-y-2">
-      {lines.map((line, i) => {
-        const trimmed = line.trim();
-        const isHeader = /^[^\s:]{2,}:$/.test(trimmed) || trimmed.startsWith("**");
-        if (isHeader) {
-          return (
-            <p key={i} className="pt-1 text-sm font-semibold">
-              {trimmed.replace(/\*\*/g, "")}
-            </p>
-          );
-        }
-        const body = withDot(trimmed.replace(/\*\*/g, ""));
-        if (body.startsWith("- ") || body.startsWith("• ")) {
-          return (
-            <p key={i} className="flex items-start gap-1.5 text-sm leading-relaxed text-foreground/90">
-              <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-primary/70" />
-              <span>{body.replace(/^[-•]\s*/, "")}</span>
-            </p>
-          );
-        }
-        return (
-          <p key={i} className="text-sm leading-relaxed text-foreground/90">
-            {body}
-          </p>
-        );
-      })}
     </div>
   );
 }
