@@ -14,12 +14,19 @@ prevents duplicate LLM calls when the page is opened concurrently.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 
 from backend.agents.db_agent import _llm_call_async
 from backend.config import settings
 from backend.crm import cache as store
-from backend.crm.labels import ACTION_FA, SIGNAL_FA, fa_money, fa_num, fa_pct
+from backend.crm.labels import (
+    ACTION_FA,
+    ACTION_NEXT_STEP_FA,
+    SIGNAL_FA,
+    fa_money,
+    fa_num,
+    fa_pct,
+)
 
 _SYSTEM = """تو «خلاصه‌ساز هوشمند» محصول Cust Intel هستی؛ همان دستیار فروش مدیران.
 
@@ -41,6 +48,27 @@ _SYSTEM = """تو «خلاصه‌ساز هوشمند» محصول Cust Intel ه�
 - پیشنهادها را فقط از فهرست «اقدام‌های پیشنهادی» که داده شده انتخاب کن و
   ساده‌سازی‌شده بنویس؛ هیچ اقدام جدیدی اختراع نکن.
 - اعداد را با ارقام فارسی و واحد «تومان» برای پول بنویس.
+"""
+
+_NEXT_ACTION_SYSTEM = """تو «دستیار اقدام» محصول Cust Intel هستی؛ همان دستیار فروش مدیران.
+
+کار تو انتخاب و توضیح «اقدام بعدی» اصلی برای یک مشتری است، بر اساس سیگنال‌ها و
+اقدام‌های پیشنهادی‌ای که موتور (ابزارهای سامانه) از داده‌ی واقعی محاسبه کرده و به
+تو داده می‌شود. تو هیچ عددی را محاسبه نمی‌کنی و هیچ تخمینی نمی‌زنی.
+
+قوانین سخت:
+- فقط از سیگنال‌ها و اقدام‌های پیشنهادیِ داده‌شده استفاده کن؛ هیچ عدد، دلیل یا
+  اقدامی اختراع نکن.
+- یک اقدام اصلی انتخاب کن و آن را با شواهد واقعی (دلایل همان سیگنال‌ها) توضیح بده:
+  چرا الان، چه کاری، گام بعدی مشخص.
+- فقط فارسی روان با نیم‌فاصله‌ی درست؛ بدون واژه‌ی فنی (امتیاز، سیگنال، الگوریتم،
+  بک‌اند، مدل) و بدون نام انگلیسی.
+- بدون هیچ علامت مارک‌داون (###، **، و امثال آن)؛ فقط متن ساده.
+- خروجی را دقیقاً در همین قالب چهارخطی بنویس (جمعاً حداکثر ۹۰ کلمه):
+اقدام اصلی: <نام اقدام>
+چرا الان: <یک یا دو شاهد از سیگنال‌ها>
+گام بعدی: <یک جمله‌ی عملی و مشخص>
+اولویت: <بالا | متوسط | کم>
 """
 
 
@@ -184,6 +212,51 @@ def _dashboard_prompt(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _next_action_prompt(snapshot: dict[str, Any]) -> str:
+    """Plain-Persian context for the «اقدام بعدی» generator: the customer's key
+    facts plus the signals and engine actions that MUST drive the choice."""
+    s = snapshot
+    lines = [
+        f"مشتری: {s['customer_id']} | بخش بازار: {s['segment']} | وضعیت: {s['status']}",
+        f"درآمد کل: {fa_money(s['revenue'])} | سفارش‌ها: {fa_num(s['orders'])} | آخرین خرید: {s['last_purchase']}",
+        f"شکایت‌ها: {fa_num(s['complaints_count'])} (باز: {fa_num(s['unresolved_complaints'])})",
+        f"پرداخت عقب‌افتاده: {fa_money(s['overdue_amount'])} | چک برگشتی: {fa_num(s['bounced_checks'])}",
+        f"درخواست توسعه باز: {fa_num(s['dev_open'])} | پذیرش پیشنهاد: {fa_pct(s['offer_acceptance'])} | بهترین نوع: {s['best_offer_type']}",
+        "",
+        "سیگنال‌های محاسبه‌شده (منبع تصمیم):",
+    ]
+    lines.extend(_signal_lines(snapshot))
+    lines.append("")
+    lines.append("اقدام‌های پیشنهادی موتور (فقط از این‌ها انتخاب کن):")
+    lines.extend(_action_lines(snapshot) or [" - فقط پایش"])
+    return "\n".join(lines)
+
+
+def _next_action_fallback(snapshot: dict[str, Any]) -> str:
+    """Deterministic «اقدام بعدی» when no LLM is configured/callable: the
+    engine's top-ranked action, formatted in the same four-line shape so the
+    frontend renders it identically."""
+    actions = snapshot.get("actions", [])
+    if not actions:
+        return (
+            "اقدام اصلی: فقط پایش\n"
+            "چرا الان: اقدام پیشنهادی مشخصی از موتور در دسترس نیست\n"
+            "گام بعدی: وضعیت مشتری را در بازبینی بعدی پایش کنید\n"
+            "اولویت: کم"
+        )
+    a = actions[0]
+    name = a.get("name") or ACTION_FA.get(a.get("action_id", ""), a.get("action_id", ""))
+    reason = a.get("reason", "") or "دلایل از سیگنال‌های مشتری در دسترس است"
+    step = ACTION_NEXT_STEP_FA.get(
+        a.get("action_id", ""), "با نماینده فروش هماهنگ کنید.")
+    return (
+        f"اقدام اصلی: {name}\n"
+        f"چرا الان: {reason}\n"
+        f"گام بعدی: {step}\n"
+        "اولویت: بالا"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cached generation with in-flight guard
 # ---------------------------------------------------------------------------
@@ -192,8 +265,11 @@ _GUARD_LOCK = asyncio.Lock()
 
 
 async def _generate(kind: str, key: str, context: dict[str, Any],
-                    prompt_builder, fp: str, refresh: bool = False) -> dict[str, Any]:
-    """Return ``{"status": "ready", "summary": ..., "generated": bool}``.
+                    prompt_builder, fp: str, refresh: bool = False,
+                    fallback: Callable[[dict[str, Any]], str] | None = None,
+                    system: str = _SYSTEM,
+                    value_key: str = "summary") -> dict[str, Any]:
+    """Return ``{status, <value_key>: str | None, generated: bool}``.
 
     Without ``refresh`` this is a pure cache read: ready when the cached
     fingerprint matches, otherwise ``generating`` (a computation is in flight)
@@ -203,9 +279,13 @@ async def _generate(kind: str, key: str, context: dict[str, Any],
     is still fresh (that is the whole point of the «تازهسازی» button). If
     another computation for the same key is already in flight, it waits for
     that computation to finish and reuses its just-saved result instead of
-    issuing a duplicate LLM call (no client polling loop either)."""
+    issuing a duplicate LLM call (no client polling loop either).
+
+    ``fallback`` (callable(context) -> str) supplies the deterministic text used
+    when no LLM is configured or the call fails; ``system`` is the system prompt
+    for the LLM call; ``value_key`` names the result field (summary / nextAction)."""
     if not refresh:
-        return await summary_status(kind, key, fp)
+        return await summary_status(kind, key, fp, value_key=value_key)
 
     while True:
         async with _GUARD_LOCK:
@@ -226,41 +306,46 @@ async def _generate(kind: str, key: str, context: dict[str, Any],
             await asyncio.sleep(0.4)
         entry = store.load(kind, key)
         if entry is not None:
-            return {"status": "ready", "summary": entry["value"], "generated": False}
+            return {"status": "ready", value_key: entry["value"], "generated": False}
         # (rare: the other computation crashed before saving — retry as owner)
 
     try:
-        summary = await _generate_llm(kind, prompt_builder(context))
+        prompt = prompt_builder(context)
+        fallback_text = fallback(context) if fallback else _fallback_summary(kind, prompt)
+        summary = await _generate_llm(kind, prompt, fallback=fallback_text, system=system)
         store.save(kind, key, summary, fp)
-        return {"status": "ready", "summary": summary, "generated": True}
+        return {"status": "ready", value_key: summary, "generated": True}
     finally:
         async with _GUARD_LOCK:
             _COMPUTING.discard(key)
 
 
-async def summary_status(kind: str, key: str, fp: str) -> dict[str, Any]:
+async def summary_status(kind: str, key: str, fp: str,
+                         value_key: str = "summary") -> dict[str, Any]:
     """Pure cache-status read: ready / generating / not_ready. No generation."""
     entry = store.load(kind, key)
     if entry is not None and entry.get("fingerprint") == fp:
-        return {"status": "ready", "summary": entry["value"], "generated": False}
+        return {"status": "ready", value_key: entry["value"], "generated": False}
     async with _GUARD_LOCK:
         in_flight = key in _COMPUTING
     if in_flight:
-        return {"status": "generating", "summary": None, "generated": False}
-    return {"status": "not_ready", "summary": None, "generated": False}
+        return {"status": "generating", value_key: None, "generated": False}
+    return {"status": "not_ready", value_key: None, "generated": False}
 
 
-async def _generate_llm(kind: str, user_prompt: str) -> str:
+async def _generate_llm(kind: str, user_prompt: str,
+                        fallback: str | None = None,
+                        system: str = _SYSTEM) -> str:
     if not settings.has_key:
-        return _fallback_summary(kind, user_prompt)
+        return fallback if fallback is not None else _fallback_summary(kind, user_prompt)
     try:
-        raw = await _llm_call_async(_SYSTEM, user_prompt, temperature=0.3)
+        raw = await _llm_call_async(system, user_prompt, temperature=0.3)
         text = (raw or "").strip()
         if text:
             return text
     except Exception:  # noqa: BLE001 — degrade gracefully to the fallback
         pass
-    return _fallback_summary(kind, user_prompt)
+    return fallback if fallback is not None else _fallback_summary(kind, user_prompt)
 
 
 def _fallback_summary(kind: str, user_prompt: str) -> str:
@@ -283,6 +368,26 @@ async def customer_summary(payload: dict[str, Any],
     key = str(payload.get("customer", {}).get("Customer_ID") or "unknown")
     return await _generate("customer360", key, snapshot, _customer_prompt,
                            fp, refresh=refresh)
+
+
+async def customer_next_action(payload: dict[str, Any],
+                               refresh: bool = False) -> dict[str, Any]:
+    """LLM-generated «اقدام بعدی» for one customer (cached).
+
+    The generator consumes the engine's computed signals/state/actions (the
+    product's tools) — never invents an action or number. Cached per customer
+    under the SAME snapshot fingerprint as the summary, so both invalidate
+    together and plain reads are cheap cache lookups (ready / generating /
+    not_ready — never triggers generation). Without an LLM the deterministic
+    top engine action is used, in the same four-line shape."""
+    snapshot = _customer_snapshot(payload)
+    fp = store.fingerprint(snapshot)
+    key = str(payload.get("customer", {}).get("Customer_ID") or "unknown")
+    return await _generate("customer_next_action", key, snapshot,
+                           _next_action_prompt, fp, refresh=refresh,
+                           fallback=_next_action_fallback,
+                           system=_NEXT_ACTION_SYSTEM,
+                           value_key="nextAction")
 
 
 async def dashboard_summary(det: dict[str, Any],

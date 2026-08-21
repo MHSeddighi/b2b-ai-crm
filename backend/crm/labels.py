@@ -80,6 +80,17 @@ ACTION_FA = {
     "NO_ACTION": "فقط پایش",
 }
 
+# Recommendation "systems" — the groups the customer-360 page shows side by
+# side (product/sales offers, retention, quality, commercial, collection...).
+ACTION_CATEGORY_FA = {
+    "relationship": "حفظ و رابطه",
+    "quality": "کیفیت و شکایت",
+    "sales": "فروش و رشد",
+    "commercial": "مالی و قرارداد",
+    "collection": "وصول و اعتبار",
+    "attention": "پایش",
+}
+
 ACTION_NEXT_STEP_FA = {
     "RETENTION_CALL": "نماینده فروش برای درک دلیل کاهش خرید و بازگرداندن مشتری تماس بگیرد.",
     "SERVICE_RECOVERY": "شکایت را حل کنید و پیش از هر فروش جدید، رضایت مشتری را مطمئن شوید.",
