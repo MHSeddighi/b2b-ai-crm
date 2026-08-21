@@ -131,3 +131,73 @@ def test_deadline_reports_expiry():
     assert not d.expired and d.remaining > 0
     d.seconds = 0
     assert d.expired
+
+
+# ---------------------------------------------------------------------------
+# Engine recommendations must reach the Persian chat answer in Persian.
+# The engine keeps canonical English internally, so every user-facing boundary
+# translates; the chat path is one and used to leak English through.
+# ---------------------------------------------------------------------------
+def test_crm_payload_is_localized_at_the_chat_boundary():
+    payload = {
+        "customer_id": "C_1",
+        "next_best_actions": [{
+            "action_id": "SERVICE_RECOVERY",
+            "name": "Service recovery",
+            "reason": "2 bounced cheque(s)",
+            "suggested_next_step":
+                "Resolve the complaint and confirm satisfaction before "
+                "proposing any additional sales.",
+        }],
+    }
+    out = db_agent._localize_crm(payload)
+    action = out["next_best_actions"][0]
+
+    assert action["action_id"] == "SERVICE_RECOVERY"  # ids untouched
+    for field in ("name", "reason", "suggested_next_step"):
+        assert not any(c.isascii() and c.isalpha() for c in action[field]), \
+            f"{field} still contains English: {action[field]!r}"
+
+
+def test_localization_preserves_non_string_values():
+    """Only human-readable keys are translated; logic fields stay intact."""
+    out = db_agent._localize_crm(
+        {"action_id": "X", "priority": 3, "score": 0.42, "flags": [1, 2]}
+    )
+    assert out["priority"] == 3
+    assert out["score"] == 0.42
+    assert out["flags"] == [1, 2]
+
+
+def test_localization_is_idempotent():
+    """Re-translating already-Persian text must not corrupt it."""
+    once = db_agent._localize_crm({"reason": "2 bounced cheque(s)"})
+    twice = db_agent._localize_crm(once)
+    assert once == twice
+
+
+# ---------------------------------------------------------------------------
+# A bounded call must degrade the answer, never blank it out. The first cut of
+# these timeouts aborted the whole reply and — because asyncio.TimeoutError
+# stringifies to "" — surfaced as a message that stopped mid-sentence:
+#   "خطا در دریافت اطلاعات مشتری:"
+# ---------------------------------------------------------------------------
+def test_timeout_note_is_never_empty():
+    note = db_agent._exc_note(asyncio.TimeoutError())
+    assert note.strip(), "a timeout must still explain itself to the user"
+    assert "طولانی" in note
+
+
+def test_exc_note_uses_the_real_message_when_there_is_one():
+    assert "boom" in db_agent._exc_note(RuntimeError("boom"))
+
+
+def test_exc_note_is_blank_only_for_a_silent_exception():
+    assert db_agent._exc_note(RuntimeError("")) == ""
+
+
+def test_crm_timeout_ceiling_clears_measured_tool_latency():
+    """top_at_risk_customers measured ~25s on a cold cache; a ceiling near that
+    fired on healthy work. The bound is for hangs, not normal slowness."""
+    assert db_agent.CRM_TOOL_TIMEOUT_S >= 60
+    assert db_agent.LLM_TIMEOUT_S >= 30

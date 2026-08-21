@@ -17,6 +17,7 @@ from backend.agents.analysis import rank_discriminators
 from backend.agents.context import SessionState, answer_preview
 from backend.agents.contracts import CRM_TOOLS
 from backend.agents.recommend import customer_signals, product_signals
+from backend.crm import labels
 from backend.agents.persian import fix_persian_zwnj
 from backend.agents.trace import Trace
 from backend.config import settings
@@ -656,6 +657,10 @@ def _llm_client() -> OpenAI:
         api_key=settings.api_key,
         base_url=settings.resolved_base_url,
         default_headers=settings.extra_headers or None,
+        # The gateway is intermittently slow; fail fast and let the SDK retry
+        # rather than sitting on one stalled request until the browser aborts.
+        timeout=LLM_TIMEOUT_S,
+        max_retries=2,
     )
 
 
@@ -829,11 +834,26 @@ async def _call_query(session: ClientSession, sql: str) -> dict[str, Any]:
 # — including everything already gathered — and just sees "connection lost".
 # Bounding each call, and the answer as a whole, turns that into a partial but
 # delivered answer instead.
-CRM_TOOL_TIMEOUT_S = 25.0
+# Measured: top_at_risk_customers takes ~25s on a cold cache, so a 25s bound
+# fired on legitimate work. Keep the ceiling well clear of real latency — it
+# exists to catch a hang, not to police normal slowness.
+CRM_TOOL_TIMEOUT_S = 75.0
+# Per-LLM-request ceiling. The gateway occasionally stalls a request; a bound
+# plus SDK retries recovers far more often than waiting one out.
+LLM_TIMEOUT_S = 60.0
 SQL_TIMEOUT_S = 60.0
 # Keep the total comfortably under the frontend's hard abort so there is time
 # left to compose and stream the narrative.
 ANSWER_BUDGET_S = 150.0
+
+
+def _exc_note(exc: BaseException) -> str:
+    """Readable suffix for an exception. asyncio.TimeoutError stringifies to
+    "", which previously produced a message that just stopped mid-sentence."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return " (زمان پاسخ‌گویی طولانی شد)"
+    text = str(exc).strip()
+    return f" ({text})" if text else ""
 
 
 class _Deadline:
@@ -850,6 +870,40 @@ class _Deadline:
     @property
     def expired(self) -> bool:
         return self.remaining <= 0
+
+
+def _localize_crm(value: Any) -> Any:
+    """Translate a CRM tool payload's user-facing strings into Persian.
+
+    The engine deliberately keeps canonical English internally (its tests and
+    the MCP contract depend on those exact strings) and each user-facing
+    surface translates at its own boundary. The chat path is such a boundary:
+    without this, engine-authored recommendations arrive in English inside an
+    otherwise Persian answer. Only known human-readable keys are touched, so
+    ids, numbers and statuses used for logic stay untouched.
+    """
+    if isinstance(value, list):
+        return [_localize_crm(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+
+    out: dict[str, Any] = {}
+    action_id = value.get("action_id") or ""
+    for key, val in value.items():
+        if key == "reason" and isinstance(val, str):
+            out[key] = labels.translate_reason(val)
+        elif key == "reasons" and isinstance(val, list):
+            out[key] = [
+                labels.translate_reason(r) if isinstance(r, str) else _localize_crm(r)
+                for r in val
+            ]
+        elif key == "name" and isinstance(val, str) and action_id:
+            out[key] = labels.action_name(action_id, val)
+        elif key == "suggested_next_step" and isinstance(val, str) and action_id:
+            out[key] = labels.action_next_step(action_id, val)
+        else:
+            out[key] = _localize_crm(val)
+    return out
 
 
 async def _call_crm_tool(session: ClientSession, tool: str,
@@ -874,7 +928,7 @@ async def _call_crm_tool(session: ClientSession, tool: str,
         for item in response.content
     )
     try:
-        data = json.loads(text)
+        data = _localize_crm(json.loads(text))
     except json.JSONDecodeError:
         # Preserve non-JSON output as a raw string result for safe display.
         data = {"_raw": text}
@@ -1482,9 +1536,14 @@ def _render_action_plan(data: dict[str, Any]) -> str:
     for a in actions[:3]:
         if not isinstance(a, dict):
             continue
-        name = a.get("name") or a.get("action_id") or "?"
-        reason = a.get("reason") or ""
-        step = a.get("suggested_next_step") or ""
+        # The engine keeps canonical English internally (its tests and the MCP
+        # contract depend on it) and Persian is applied at each user-facing
+        # boundary — the chat path is one, so translate here too. Otherwise the
+        # recommendation reaches the user in English inside a Persian answer.
+        action_id = a.get("action_id") or ""
+        name = labels.action_name(action_id, a.get("name") or action_id or "?")
+        reason = labels.translate_reason(a.get("reason") or "")
+        step = labels.action_next_step(action_id, a.get("suggested_next_step") or "")
         priority = a.get("priority")
         line = f"- {name}"
         if priority is not None:
@@ -1829,8 +1888,8 @@ async def _database_answer(
                 trace.stage("crm_tool", f"در حال دریافت نتایج {tool}", customer_id or str(args))
             try:
                 data = await _call_crm_tool(await _ensure_mcp(), tool, args, trace)
-            except Exception as exc:  # noqa: BLE001
-                return _error(f"خطا در دریافت اطلاعات مشتری: {exc}")
+            except Exception:  # noqa: BLE001 - degrade, don't abort the answer
+                continue
             key = f"{tool}:{customer_id or args.get('limit')}"
             crm_results[key] = data
 
@@ -1931,6 +1990,8 @@ async def _llm_stream(
             api_key=settings.api_key,
             base_url=settings.resolved_base_url,
             default_headers=settings.extra_headers or None,
+            timeout=LLM_TIMEOUT_S,
+            max_retries=2,
         )
         yielded_any = False
         try:
@@ -2112,6 +2173,7 @@ async def _database_answer_stream(
     yield {"type": "status", "status": "planning"}
 
     plan = None
+    plan_error: Exception | None = None
     try:
         async for item in _plan_stream(question, ctx, trace):
             kind, payload = item
@@ -2119,17 +2181,33 @@ async def _database_answer_stream(
                 yield {"type": "thinking", "text": payload}
             else:
                 plan = payload
-    except Exception as exc:  # noqa: BLE001
-        reason = str(exc).strip() or "نتیجه برنامه‌ریزی نامعتبر بود"
-        yield {"type": "error", "message": f"خطا در تحلیل سؤال: {reason}"}
-        return
+    except Exception as exc:  # noqa: BLE001 - retried non-streamed below
+        plan_error = exc
+
+    if plan is None:
+        # The gateway stalls a request now and then. Losing the whole answer to
+        # one flaky planning call is not acceptable, so retry once without
+        # streaming (a single short request, much less exposed to a mid-stream
+        # stall) before giving up.
+        yield {
+            "type": "thinking",
+            "text": "برنامه‌ریزی از بار اول کامل نشد؛ یک بار دیگر تلاش می‌کنم…",
+        }
+        try:
+            plan = await _plan(question, ctx)
+        except Exception as exc:  # noqa: BLE001
+            plan_error = exc
 
     if trace is not None:
         for ev in trace.drain():
             yield {"type": ev["t"], **{k: v for k, v in ev.items() if k not in ("t", "ts")}}
 
     if plan is None:
-        yield {"type": "error", "message": "خطا در تحلیل سؤال: طرح تولید نشد."}
+        reason = _exc_note(plan_error) if plan_error else " (طرح تولید نشد)"
+        yield {
+            "type": "error",
+            "message": f"تحلیل سؤال ناموفق بود{reason}. لطفاً دوباره تلاش کنید.",
+        }
         return
 
     steps = plan["steps"]
@@ -2252,8 +2330,16 @@ async def _database_answer_stream(
             try:
                 data = await _call_crm_tool(await _ensure_mcp(), tool, crm_args, trace)
             except Exception as exc:  # noqa: BLE001
-                yield {"type": "error", "message": f"خطا در دریافت اطلاعات مشتری: {exc}"}
-                return
+                # One slow/failing signal must not abort the whole answer: skip
+                # this tool and carry on with whatever else the plan gathers.
+                # (Aborting here used to surface as a blank "خطا در دریافت
+                # اطلاعات مشتری:" because a TimeoutError stringifies to "".)
+                yield {
+                    "type": "thinking",
+                    "text": f"دریافت «{tool}» ناموفق بود؛ بدون آن ادامه می‌دهم"
+                            f"{_exc_note(exc)}.",
+                }
+                continue
             crm_results[f"{tool}:{customer_id or crm_args.get('limit')}"] = data
             if trace is not None:
                 for ev in trace.drain():
