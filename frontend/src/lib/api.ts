@@ -29,6 +29,12 @@ export interface RiskSignal {
 export interface CustomerAction {
   id: string;
   name: string;
+  /** Engine category: relationship | quality | sales | commercial | collection | attention */
+  category?: string;
+  /** Persian category label (backend-provided). */
+  categoryLabel?: string;
+  /** Engine priority score 0..1. */
+  priority?: number;
   reason: string;
   evidence?: string[];
   next_step?: string;
@@ -100,6 +106,9 @@ export interface Customer360Data {
   customerProfile: { label: string; value: unknown }[];
   summary: string | null;
   summaryReady: boolean;
+  /** LLM-generated «اقدام بعدی» (cached; same fingerprint as the summary). */
+  nextAction: string | null;
+  nextActionReady: boolean;
   riskScore: number | null;
   riskLevel: string;
   riskSignals: RiskSignal[];
@@ -201,12 +210,18 @@ export type SummaryStatus =
   | { status: "not_ready"; summary: null; generated: boolean }
   | { status: "not_found"; summary: null; generated: boolean };
 
+export type NextActionStatus =
+  | { status: "ready"; nextAction: string; generated: boolean }
+  | { status: "generating"; nextAction: null; generated: boolean }
+  | { status: "not_ready"; nextAction: null; generated: boolean }
+  | { status: "not_found"; nextAction: null; generated: boolean };
+
 // Backend is reached directly at its absolute path (no Vite proxy).
 const BACKEND_PORT = Number(import.meta.env.VITE_BACKEND_PORT || 8000);
 const API_URL = `http://127.0.0.1:${BACKEND_PORT}/api`;
 
-async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`);
+async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, { signal });
   if (!res.ok) throw new Error(`Backend returned ${res.status}`);
   return (await res.json()) as T;
 }
@@ -232,9 +247,17 @@ export function fetchCustomer360(id: string): Promise<Customer360Data> {
   return getJson<Customer360Data>(`/customers/${encodeURIComponent(id)}/360`);
 }
 
-export function fetchCustomer360Summary(id: string, refresh = false): Promise<SummaryStatus> {
+export function fetchCustomer360Summary(id: string, refresh = false, signal?: AbortSignal): Promise<SummaryStatus> {
   return getJson<SummaryStatus>(
-    `/customers/${encodeURIComponent(id)}/360/summary${refresh ? "?refresh=1" : ""}`
+    `/customers/${encodeURIComponent(id)}/360/summary${refresh ? "?refresh=1" : ""}`,
+    signal
+  );
+}
+
+export function fetchCustomer360NextAction(id: string, refresh = false, signal?: AbortSignal): Promise<NextActionStatus> {
+  return getJson<NextActionStatus>(
+    `/customers/${encodeURIComponent(id)}/360/next-action${refresh ? "?refresh=1" : ""}`,
+    signal
   );
 }
 

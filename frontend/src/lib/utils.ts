@@ -64,6 +64,8 @@ export function formatDate(value: string | null | undefined): string {
     }
     j_day_of_year -= j_days_in_month[i];
   }
-  const fa = (n: number) => new Intl.NumberFormat("fa-IR").format(n);
+  // Persian digits without the thousands separator — a Jalali year like ۱۳۹۸
+  // must never render as ۱٬۳۹۸.
+  const fa = (n: number) => new Intl.NumberFormat("fa-IR", { useGrouping: false }).format(n);
   return `${fa(jy)}/${fa(jm)}/${fa(j_day_of_year)}`;
 }

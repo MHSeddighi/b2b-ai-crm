@@ -85,6 +85,7 @@ class ActionDefinition(BaseModel):
 class RecommendedAction(BaseModel):
     action_id: str
     name: str
+    category: str = ""                  # relationship | quality | sales | commercial | collection | attention
     priority: float                     # 0..1
     confidence: float                   # 0..1
     reason: str

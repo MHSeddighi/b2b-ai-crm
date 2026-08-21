@@ -19,7 +19,8 @@ def test_customer_360_has_all_sections():
     payload = api_data.customer_360(_any_customer())
     assert payload is not None
     for key in (
-        "customer", "summary", "summaryReady", "riskLevel", "riskSignals",
+        "customer", "summary", "summaryReady", "nextAction", "nextActionReady",
+        "riskLevel", "riskSignals",
         "actions", "orders", "revenue", "complaints", "complaintList",
         "interactions", "interactionsCount", "transactions", "devRequests",
         "devCount", "devOpen", "offers", "offerAcceptance", "collections",
@@ -45,6 +46,29 @@ def test_customer_360_signal_and_action_shapes():
         assert sig["tone"] in ("positive", "negative", "neutral")
     for act in payload["actions"]:
         assert act["id"] and act["name"] and act["reason"]
+        assert act["category"] in (
+            "relationship", "quality", "sales", "commercial", "collection", "attention")
+        assert act["categoryLabel"]
+        assert act["priority"] is not None
+
+
+def test_customer_360_actions_grouped_by_category():
+    """The 360 payload surfaces ALL eligible engine actions, grouped by
+    category, and excludes the noisy monitor-only fallback unless nothing
+    else is actionable."""
+    payload = api_data.customer_360(_any_customer())
+    actions = payload["actions"]
+    assert actions, "expected at least one recommended action"
+    assert all(a["id"] != "NO_ACTION" for a in actions), \
+        "monitor-only must not be listed while real actions exist"
+    categories = {a["category"] for a in actions}
+    for cat in categories:
+        items = [a for a in actions if a["category"] == cat]
+        assert len({a["categoryLabel"] for a in items}) == 1
+    # Every category shown must have its Persian label in the payload.
+    from backend.crm.labels import ACTION_CATEGORY_FA
+    for cat in categories:
+        assert ACTION_CATEGORY_FA[cat] in [a["categoryLabel"] for a in actions]
 
 
 def test_dashboard_includes_intelligence_and_recommendations():
@@ -71,7 +95,7 @@ def test_analyses_payload_shapes():
 
 
 def test_customer_summary_cached_and_reused(monkeypatch):
-    async def fake_generate_llm(kind, prompt):
+    async def fake_generate_llm(kind, prompt, fallback=None, system=None):
         return ("وضعیت کلی: مشتری در وضعیت نیازمند توجه است.\n\n"
                 "نکات مهم:\n - شکایت باز وجود دارد.\n\n"
                 "پیشنهاد اقدام:\n - رسیدگی به شکایت‌ها.")
@@ -104,8 +128,85 @@ def test_customer_summary_cached_and_reused(monkeypatch):
     asyncio.run(run())
 
 
+def test_customer_next_action_cached_and_reused(monkeypatch):
+    """The «اقدام بعدی» follows the same cached lifecycle as the summary:
+    not_ready until refreshed, then one generation reused by plain reads, and
+    «تازهسازی» always regenerates."""
+    async def fake_generate_llm(kind, prompt, fallback=None, system=None):
+        return ("اقدام اصلی: رسیدگی به شکایت‌ها\n"
+                "چرا الان: پس از شکایت، خرید کاهش یافته و شکایت باز است\n"
+                "گام بعدی: شکایت را حل کنید و رضایت مشتری را مطمئن شوید\n"
+                "اولویت: بالا")
+    monkeypatch.setattr(intel_summary, "_generate_llm", fake_generate_llm)
+
+    cid = _any_customer()
+    p = store._path("customer_next_action", cid)
+    if p.exists():
+        p.unlink()
+
+    async def run():
+        payload = api_data.customer_360(cid)
+        # Without cache and without refresh -> not_ready (never auto-generates)
+        not_ready = await intel_summary.customer_next_action(payload)
+        assert not_ready["status"] == "not_ready"
+        assert not_ready["nextAction"] is None
+        # Explicit refresh triggers generation once, then it is cached
+        first = await intel_summary.customer_next_action(payload, refresh=True)
+        assert first["status"] == "ready"
+        assert first["generated"] is True
+        assert first["nextAction"].startswith("اقدام اصلی:")
+        second = await intel_summary.customer_next_action(payload)
+        assert second["status"] == "ready"
+        assert second["generated"] is False
+        assert second["nextAction"] == first["nextAction"]
+        # «تازهسازی» must regenerate even when the cache is fresh.
+        again = await intel_summary.customer_next_action(payload, refresh=True)
+        assert again["status"] == "ready"
+        assert again["generated"] is True
+        # And the overlay in the 360 payload picks it up.
+        overlay = api_data.customer_360(cid)
+        assert overlay["nextActionReady"] is True
+        assert overlay["nextAction"] == first["nextAction"]
+    asyncio.run(run())
+
+
+def test_customer_next_action_fallback_when_llm_fails(monkeypatch):
+    """Without a working LLM the deterministic top engine action is used, in
+    the same four-line shape, with no markdown and no English."""
+    async def boom(kind, prompt, fallback=None, system=None):
+        raise RuntimeError("llm down")
+    monkeypatch.setattr(intel_summary, "_llm_call_async", boom)
+
+    cid = _any_customer()
+    p = store._path("customer_next_action", cid)
+    if p.exists():
+        p.unlink()
+
+    async def run():
+        import re
+        payload = api_data.customer_360(cid)
+        res = await intel_summary.customer_next_action(payload, refresh=True)
+        assert res["status"] == "ready"
+        text = res["nextAction"]
+        assert text.startswith("اقدام اصلی:")
+        for token in ("اقدام اصلی:", "چرا الان:", "گام بعدی:", "اولویت:"):
+            assert token in text, token
+        assert "###" not in text and "**" not in text
+        assert re.search(r"[a-zA-Z]", text) is None, text
+    asyncio.run(run())
+
+
+def test_next_action_fallback_uses_top_engine_action():
+    snapshot = intel_summary._customer_snapshot(api_data.customer_360(_any_customer()))
+    fallback = intel_summary._next_action_fallback(snapshot)
+    assert fallback.startswith("اقدام اصلی:")
+    assert "چرا الان:" in fallback
+    assert "گام بعدی:" in fallback
+    assert "اولویت:" in fallback
+
+
 def test_dashboard_summary_cached_and_reused(monkeypatch):
-    async def fake_generate_llm(kind, prompt):
+    async def fake_generate_llm(kind, prompt, fallback=None, system=None):
         return ("وضعیت کلی: فروش روند رو به رشدی دارد.\n\n"
                 "پیشنهاد اقدام:\n - تمرکز روی مشتریان پرریسک.")
     monkeypatch.setattr(intel_summary, "_generate_llm", fake_generate_llm)
@@ -135,7 +236,7 @@ def test_dashboard_summary_cached_and_reused(monkeypatch):
 
 
 def test_customer_summary_fingerprint_stable_across_fresh_payloads(monkeypatch):
-    async def fake_generate_llm(kind, prompt):
+    async def fake_generate_llm(kind, prompt, fallback=None, system=None):
         return "وضعیت کلی: مشتری نیازمند توجه است."
     monkeypatch.setattr(intel_summary, "_generate_llm", fake_generate_llm)
 
@@ -162,7 +263,7 @@ def test_summary_refresh_concurrent_requests_reuse_one_result(monkeypatch):
     second request waits for the first and reuses its freshly-saved result."""
     calls = 0
 
-    async def fake_generate_llm(kind, prompt):
+    async def fake_generate_llm(kind, prompt, fallback=None, system=None):
         nonlocal calls
         calls += 1
         return f"وضعیت کلی: نسخه {calls}"

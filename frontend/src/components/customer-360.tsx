@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   ArrowRight,
   BadgeCheck,
   CalendarClock,
   ClipboardList,
+  Eye,
   Handshake,
-  Lightbulb,
+  Landmark,
   Loader2,
   MailQuestion,
   MessageSquareWarning,
@@ -15,17 +16,20 @@ import {
   ShoppingCart,
   Sparkles,
   Tags,
+  TrendingUp,
   Wallet,
 } from "lucide-react";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   fetchCustomer360,
   fetchCustomer360Summary,
+  fetchCustomer360NextAction,
   type Customer360Data,
   type SummaryStatus,
+  type NextActionStatus,
   type RiskSignal,
   type CustomerAction,
   type ComplaintRecord,
@@ -39,6 +43,7 @@ import {
 import { formatCurrency, formatNumber, formatDate, withDot, cn } from "@/lib/utils";
 import { SectionCard } from "@/components/section-card";
 import { SummaryText } from "@/components/summary-text";
+import { parseNextAction } from "@/lib/next-action";
 
 const riskTone: Record<string, string> = {
   زیاد: "bg-red-500",
@@ -66,12 +71,34 @@ const statusTone: Record<string, string> = {
   "درحال مذاکره": "bg-amber-500",
 };
 
+/* Recommendation systems — the engine's actions grouped by category. The
+   Persian labels come from the backend (categoryLabel); the frontend only maps
+   category keys to icons/accents. */
+const ACTION_GROUP_META: Record<string, { icon: typeof ShoppingCart; tone: string; dot: string }> = {
+  sales: { icon: ShoppingCart, tone: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400", dot: "bg-emerald-500" },
+  relationship: { icon: Handshake, tone: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400", dot: "bg-indigo-500" },
+  quality: { icon: MessageSquareWarning, tone: "bg-red-500/10 text-red-600 dark:text-red-400", dot: "bg-red-500" },
+  commercial: { icon: Wallet, tone: "bg-sky-500/10 text-sky-600 dark:text-sky-400", dot: "bg-sky-500" },
+  collection: { icon: Landmark, tone: "bg-violet-500/10 text-violet-600 dark:text-violet-400", dot: "bg-violet-500" },
+  attention: { icon: Eye, tone: "bg-muted text-muted-foreground", dot: "bg-muted-foreground" },
+};
+
+const ACTION_GROUP_ORDER = ["sales", "relationship", "quality", "commercial", "collection", "attention"];
+
+function priorityLevel(score: number | undefined): "بالا" | "متوسط" | "کم" | null {
+  if (score == null) return null;
+  if (score >= 0.5) return "بالا";
+  if (score >= 0.25) return "متوسط";
+  return "کم";
+}
+
 const LOADER_TEXTS = [
   "در حال تحلیل داده‌های مشتری…",
   "در حال بررسی شکایات و تعاملات…",
   "در حال بررسی وضعیت خرید و پرداخت‌ها…",
   "در حال آماده‌سازی پیشنهادها…",
   "کمی صبر کنید؛ خلاصه در حال آماده شدن است…",
+  "اولین تولید ممکن است تا یک دقیقه طول بکشد…",
 ];
 
 /* ------------------------------------------------------------------ pieces */
@@ -91,26 +118,11 @@ function SignalRow({ signal }: { signal: RiskSignal }) {
   );
 }
 
-function ActionItem({ action }: { action: CustomerAction }) {
-  return (
-    <div className="flex items-start gap-2 rounded-lg border bg-muted/30 p-2.5">
-      <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-      <div className="min-w-0 leading-tight">
-        <p className="text-xs font-medium">{action.name}</p>
-        <p className="mt-0.5 text-[11px] text-muted-foreground">{action.reason}</p>
-        {action.next_step && (
-          <p className="mt-0.5 text-[11px] text-muted-foreground/80">{action.next_step}</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function MetaRow({ label, value }: { label: string; value: ReactNode }) {
+function MetaRow({ label, value, small = false }: { label: string; value: ReactNode; small?: boolean }) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="truncate font-medium tabular-nums">{value}</span>
+      <span className={cn("text-muted-foreground", small && "text-[11px]")}>{label}</span>
+      <span className={cn("truncate font-medium tabular-nums", small ? "text-xs" : "")}>{value}</span>
     </div>
   );
 }
@@ -347,6 +359,8 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
   const [error, setError] = useState(false);
   const [summary, setSummary] = useState<SummaryStatus | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
+  const [nextAction, setNextAction] = useState<NextActionStatus | null>(null);
   const topRef = useRef<HTMLDivElement>(null);
   const stopPollRef = useRef<() => void>(() => {});
 
@@ -354,7 +368,9 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
     topRef.current?.scrollIntoView({ block: "start" });
     setView(null);
     setSummary(null);
+    setNextAction(null);
     setRefreshing(false);
+    setRefreshError(false);
     stopPollRef.current();
     stopPollRef.current = () => {};
 
@@ -364,21 +380,81 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         if (data.summaryReady) {
           setSummary({ status: "ready", summary: data.summary ?? "", generated: false });
         }
+        if (data.nextActionReady) {
+          setNextAction({ status: "ready", nextAction: data.nextAction ?? "", generated: false });
+        }
+        // Always generate the intelligence when it doesn't exist yet — no
+        // «آمادهسازی» button, the 360 view generates it on first render.
+        if (!data.summaryReady || !data.nextActionReady) {
+          generate({ summary: !data.summaryReady, nextAction: !data.nextActionReady });
+        }
       })
       .catch(() => setError(true));
     return () => stopPollRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerId]);
 
-  function refreshSummary() {
+  /** Generate only the missing parts (summary / next action) and apply each
+   * result independently. Both are cached server-side; a first generation can
+   * take up to a minute, so a generous timeout aborts a hung request. */
+  function generate(only: { summary: boolean; nextAction: boolean }) {
     setRefreshing(true);
-    // The backend waits for the regeneration to finish — single request, no polling.
-    fetchCustomer360Summary(customerId, true)
-      .then((res) => {
-        if (res.status === "ready") setSummary(res);
-        setRefreshing(false);
-      })
-      .catch(() => setRefreshing(false));
+    setRefreshError(false);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 180_000);
+    let okSummary = !only.summary;
+    let okAction = !only.nextAction;
+    const jobs: Promise<void>[] = [];
+    if (only.summary) {
+      jobs.push(
+        fetchCustomer360Summary(customerId, true, controller.signal)
+          .then((res) => {
+            if (res.status === "ready") {
+              setSummary(res);
+              okSummary = true;
+            }
+          })
+          .catch(() => {})
+      );
+    }
+    if (only.nextAction) {
+      jobs.push(
+        fetchCustomer360NextAction(customerId, true, controller.signal)
+          .then((res) => {
+            if (res.status === "ready") {
+              setNextAction(res);
+              okAction = true;
+            }
+          })
+          .catch(() => {})
+      );
+    }
+    Promise.allSettled(jobs).then(() => {
+      window.clearTimeout(timer);
+      if (!okSummary || !okAction) setRefreshError(true);
+      setRefreshing(false);
+    });
   }
+
+  /** Manual «تازهسازی»: regenerate the whole intelligence card. */
+  function refreshSummary() {
+    generate({ summary: true, nextAction: true });
+  }
+
+  // Group all engine actions by recommendation system (category). Must be a
+  // hook call above every early return so the hook order never changes.
+  const actionGroups = useMemo(() => {
+    const groups = new Map<string, CustomerAction[]>();
+    for (const a of view?.actions ?? []) {
+      const key = a.category || "attention";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(a);
+    }
+    return ACTION_GROUP_ORDER.filter((k) => groups.has(k)).map((k) => ({
+      key: k,
+      items: groups.get(k)!,
+    }));
+  }, [view]);
 
   if (error) {
     return (
@@ -399,6 +475,8 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
 
   const barColor = riskTone[view.riskLevel] ?? "bg-amber-500";
   const summaryText = summary?.status === "ready" ? summary.summary : null;
+  const nextActionText = nextAction?.status === "ready" ? nextAction.nextAction : null;
+  const parsedNextAction = nextActionText ? parseNextAction(nextActionText) : null;
   const stateChips: { key: string; label: string }[] = [
     { key: "relationship_health", label: "رابطه" },
     { key: "growth_opportunity", label: "رشد" },
@@ -465,19 +543,20 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         </CardContent>
       </Card>
 
-      {/* Intelligence summary (LLM) — cached; regenerated only on refresh */}
+      {/* Intelligence summary (LLM) — cached; regenerated only on refresh.
+          Includes the LLM next action so the whole intelligence is one card. */}
       <Card className="border-primary/30 bg-gradient-to-br from-primary/5 to-transparent">
         <CardHeader className="pb-2">
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-primary" />
             <CardTitle className="text-sm">خلاصه هوشمند</CardTitle>
-            {summaryText && !refreshing && (
+            {(summaryText || nextActionText) && !refreshing && (
               <Badge variant="outline" className="mr-auto gap-1 border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                 <BadgeCheck className="h-3 w-3" />
                 آماده
               </Badge>
             )}
-            <Button variant="ghost" size="sm" className="gap-1 text-muted-foreground" onClick={refreshSummary} disabled={refreshing} title="محاسبه دوباره خلاصه">
+            <Button variant="ghost" size="sm" className="gap-1 text-muted-foreground" onClick={refreshSummary} disabled={refreshing} title="محاسبه دوباره خلاصه و اقدام بعدی">
               <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
               تازه‌سازی
             </Button>
@@ -486,17 +565,141 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
         <CardContent>
           {refreshing ? (
             <SummaryLoader />
-          ) : summaryText ? (
-            <SummaryText text={summaryText} />
-          ) : (
+          ) : refreshError ? (
             <div className="flex flex-col items-start gap-3">
               <p className="text-sm text-muted-foreground">
-                با کلیک روی «آماده‌سازی خلاصه»، خلاصه هوشمند از روی داده‌های واقعی این مشتری ساخته می‌شود
+                تولید خلاصه در این لحظه ممکن نشد. دوباره تلاش کنید؛ اولین تولید ممکن است تا یک دقیقه طول بکشد.
               </p>
               <Button size="sm" onClick={refreshSummary}>
-                <Sparkles className="mr-1 h-3.5 w-3.5" />
-                آماده‌سازی خلاصه
+                <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                تلاش دوباره
               </Button>
+            </div>
+          ) : summaryText ? (
+            <div className={cn("grid gap-3", parsedNextAction && "lg:grid-cols-2")}>
+              <div>
+                <SummaryText text={summaryText} />
+              </div>
+              {parsedNextAction && (
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">اقدام بعدی</p>
+                  <p className="mt-1 text-sm font-semibold leading-snug">
+                    {parsedNextAction.action}
+                    {parsedNextAction.priority !== "نامشخص" && (
+                      <span className="font-normal text-muted-foreground"> · اولویت: {parsedNextAction.priority}</span>
+                    )}
+                  </p>
+                  {parsedNextAction.why && (
+                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                      <span className="font-semibold text-foreground">چرا: </span>
+                      {parsedNextAction.why}
+                    </p>
+                  )}
+                  {parsedNextAction.nextStep && (
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                      <span className="font-semibold text-foreground">گام بعدی: </span>
+                      {parsedNextAction.nextStep}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            // Unreachable in practice: the 360 view auto-generates the
+            // intelligence when it doesn't exist, so the loader is shown.
+            null
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Recommendation systems — ALL engine actions, grouped by category
+          (product/sales offers, retention, quality, commercial, collection) */}
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-center gap-2">
+            <ClipboardList className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm">سامانه‌های پیشنهاد</CardTitle>
+            <Badge variant="outline" className="mr-auto gap-1 border-transparent bg-primary/10 text-primary">
+              {formatNumber(view.actions.length)} اقدام از موتور
+            </Badge>
+          </div>
+          <CardDescription>
+            {withDot("همه‌ی اقدام‌های پیشنهادی موتور از سیگنال‌های این مشتری، دسته‌بندی‌شده — از فروش و محصول تا وصول و اعتبار")}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {actionGroups.length === 0 ? (
+            <p className="rounded-lg border border-dashed p-4 text-center text-xs text-muted-foreground">
+              {withDot("اقدام پیشنهادی‌ای از سیگنال‌های این مشتری محاسبه نشده است")}
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {actionGroups.map((g) => {
+                const meta = ACTION_GROUP_META[g.key] ?? ACTION_GROUP_META.attention;
+                const Icon = meta.icon;
+                const label = g.items[0].categoryLabel || g.key;
+                return (
+                  <div key={g.key} className="rounded-xl border bg-muted/30 p-3">
+                    <div className="flex items-center gap-2">
+                      <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", meta.tone)}>
+                        <Icon className="h-4 w-4" />
+                      </span>
+                      <p className="text-sm font-semibold">{label}</p>
+                      <span className="mr-auto rounded-full bg-background px-2 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+                        {formatNumber(g.items.length)}
+                      </span>
+                    </div>
+                    <div className="mt-2.5 space-y-2">
+                      {g.items.map((a) => {
+                        const lvl = priorityLevel(a.priority);
+                        return (
+                          <div key={a.id} className="rounded-lg border bg-card p-2">
+                            <div className="flex items-start gap-1.5">
+                              <span className={cn("mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full", meta.dot)} />
+                              <div className="min-w-0 flex-1 leading-tight">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <p className="text-xs font-medium">{a.name}</p>
+                                  {lvl && (
+                                    <span
+                                      className={cn(
+                                        "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                                        lvl === "بالا" && "bg-red-500/10 text-red-600 dark:text-red-400",
+                                        lvl === "متوسط" && "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+                                        lvl === "کم" && "bg-muted text-muted-foreground"
+                                      )}
+                                    >
+                                      اولویت {lvl}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">{a.reason}</p>
+                                {a.next_step && (
+                                  <p className="mt-0.5 text-[11px] text-muted-foreground/80">{a.next_step}</p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {/* Offer/product hint for the sales system — real data */}
+                    {g.key === "sales" && (view.bestOfferType || view.devOpen > 0) && (
+                      <div className="mt-2.5 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] p-2">
+                        <p className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                          <TrendingUp className="h-3.5 w-3.5" />
+                          پیشنهاد مناسب این مشتری
+                        </p>
+                        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                          {view.bestOfferType && (
+                            <>نوع «{view.bestOfferType}»{view.offerAcceptance != null && <> · پذیرش {formatNumber(Math.round(view.offerAcceptance * 100))}٪</>}</>
+                          )}
+                          {view.devOpen > 0 && <>{view.bestOfferType ? " · " : ""}{formatNumber(view.devOpen)} درخواست توسعه باز</>}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -550,17 +753,17 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
             </div>
           </CardHeader>
           <CardContent className="flex flex-1 flex-col justify-between gap-2.5">
-            <div className="space-y-2.5">
-              <MetaRow label="درآمد کل" value={formatCurrency(view.revenue)} />
-              <MetaRow label="سفارش‌ها" value={formatNumber(view.orders)} />
-              <MetaRow label="میانگین هر سفارش" value={formatCurrency(view.avgOrderValue)} />
-              <MetaRow label="آخرین خرید" value={formatDate(view.lastPurchase)} />
-              <MetaRow label="محصول اصلی" value={view.topProduct ?? "—"} />
+            <div className="space-y-2">
+              <MetaRow small label="درآمد کل" value={formatCurrency(view.revenue)} />
+              <MetaRow small label="سفارش‌ها" value={formatNumber(view.orders)} />
+              <MetaRow small label="میانگین هر سفارش" value={formatCurrency(view.avgOrderValue)} />
+              <MetaRow small label="آخرین خرید" value={formatDate(view.lastPurchase)} />
+              <MetaRow small label="محصول اصلی" value={view.topProduct ?? "—"} />
             </div>
-            <div className="space-y-2.5 border-t pt-2.5">
-              <MetaRow label="تعاملات" value={formatNumber(view.interactionsCount)} />
-              <MetaRow label="مطالبات عقب‌افتاده" value={formatCurrency(view.overdueAmount)} />
-              <MetaRow label="چک برگشتی" value={formatNumber(view.bouncedChecks)} />
+            <div className="space-y-2 border-t pt-2">
+              <MetaRow small label="تعاملات" value={formatNumber(view.interactionsCount)} />
+              <MetaRow small label="مطالبات عقب‌افتاده" value={formatCurrency(view.overdueAmount)} />
+              <MetaRow small label="چک برگشتی" value={formatNumber(view.bouncedChecks)} />
             </div>
           </CardContent>
         </Card>
@@ -607,7 +810,7 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
 
       {/* Sections — varied responsive widths, all items visible with scroll */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
-        <div className="xl:col-span-5">
+        <div className="xl:col-span-6">
           <SectionCard
             icon={Activity}
             title="نشانه‌های وضعیت مشتری"
@@ -617,23 +820,47 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           </SectionCard>
         </div>
 
-        <div className="xl:col-span-7">
-          <SectionCard
-            icon={Lightbulb}
-            title="اقدام پیشنهادی"
-            count={view.actions.length}
-          >
-            <SectionList items={view.actions} render={(a) => <ActionItem action={a} />} empty="اقدام پیشنهادی‌ای نیست" />
-          </SectionCard>
-        </div>
-
-        <div className="xl:col-span-7">
+        <div className="xl:col-span-6">
           <SectionCard
             icon={MessageSquareWarning}
             title="شکایات و عوامل آن"
             count={view.complaintList.length}
           >
             <SectionList items={view.complaintList} render={(c) => <ComplaintCard c={c} />} empty="شکایتی ثبت نشده است" />
+          </SectionCard>
+        </div>
+
+        <div className="xl:col-span-6">
+          <SectionCard
+            icon={ClipboardList}
+            title="درخواست‌های توسعه محصول"
+            count={view.devCount}
+            badge={
+              view.devOpen > 0 ? (
+                <Badge variant="outline" className="gap-1 border-transparent bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                  {formatNumber(view.devOpen)} باز
+                </Badge>
+              ) : undefined
+            }
+          >
+            <SectionList items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است" />
+          </SectionCard>
+        </div>
+
+        <div className="xl:col-span-6">
+          <SectionCard
+            icon={Tags}
+            title="پیشنهادهای قیمتی"
+            count={view.offers.length}
+            badge={
+              view.offerAcceptance != null ? (
+                <Badge variant="outline" className="gap-1 border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                  پذیرش {formatNumber(Math.round(view.offerAcceptance * 100))}٪
+                </Badge>
+              ) : undefined
+            }
+          >
+            <SectionList items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است" />
           </SectionCard>
         </div>
 
@@ -657,41 +884,19 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
           </SectionCard>
         </div>
 
-        <div className="xl:col-span-5">
-          <SectionCard
-            icon={ClipboardList}
-            title="درخواست‌های توسعه محصول"
-            count={view.devCount}
-            badge={
-              view.devOpen > 0 ? (
-                <Badge variant="outline" className="gap-1 border-transparent bg-amber-500/10 text-amber-600 dark:text-amber-400">
-                  {formatNumber(view.devOpen)} باز
-                </Badge>
-              ) : undefined
-            }
-          >
-            <SectionList items={view.devRequests} render={(d) => <DevCard d={d} />} empty="درخواست توسعه‌ای ثبت نشده است" />
-          </SectionCard>
-        </div>
+        {view.marketSignals.length > 0 && (
+          <div className="xl:col-span-12">
+            <SectionCard
+              icon={MailQuestion}
+              title="نشانه‌های بازار"
+              count={view.marketSignals.length}
+              >
+              <SectionList items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است" />
+            </SectionCard>
+          </div>
+        )}
 
-        <div className="xl:col-span-5">
-          <SectionCard
-            icon={Tags}
-            title="پیشنهادهای قیمتی"
-            count={view.offers.length}
-            badge={
-              view.offerAcceptance != null ? (
-                <Badge variant="outline" className="gap-1 border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
-                  پذیرش {formatNumber(Math.round(view.offerAcceptance * 100))}٪
-                </Badge>
-              ) : undefined
-            }
-          >
-            <SectionList items={view.offers} render={(o) => <OfferCard o={o} />} empty="پیشنهادی ثبت نشده است" />
-          </SectionCard>
-        </div>
-
-        <div className="xl:col-span-7">
+        <div className="xl:col-span-12">
           <SectionCard
             icon={Wallet}
             title="وصول و پرداخت‌ها"
@@ -707,18 +912,6 @@ export function Customer360({ customerId, onBack }: { customerId: string; onBack
             <SectionList items={view.collections} render={(c) => <CollectionRow c={c} />} empty="رویداد وصولی ثبت نشده است" />
           </SectionCard>
         </div>
-
-        {view.marketSignals.length > 0 && (
-          <div className="xl:col-span-5">
-            <SectionCard
-              icon={MailQuestion}
-              title="نشانه‌های بازار"
-              count={view.marketSignals.length}
-              >
-              <SectionList items={view.marketSignals} render={(m) => <MarketCard m={m} />} empty="نشانه‌ای ثبت نشده است" />
-            </SectionCard>
-          </div>
-        )}
       </div>
     </div>
   );

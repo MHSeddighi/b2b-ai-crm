@@ -447,13 +447,14 @@ def _customer_fingerprint(con: duckdb.DuckDBPyConnection,
 
 
 def customer_360(customer_id: str) -> dict[str, Any] | None:
-    """Full customer-360 payload (all dataset sections + cached LLM summary).
-    The deterministic part is cached per customer under a data fingerprint, so
-    the first visit computes it and every later visit reads it instantly. The
-    LLM summary status is NEVER cached inside the payload: it is overlaid live
-    from the summary cache (and re-validated against the current payload
-    fingerprint), so a freshly generated summary is visible immediately and a
-    stale one is correctly reported as not-ready."""
+    """Full customer-360 payload (all dataset sections + cached LLM summary and
+    cached LLM «اقدام بعدی»). The deterministic part is cached per customer
+    under a data fingerprint, so the first visit computes it and every later
+    visit reads it instantly. The LLM summary and next-action statuses are NEVER
+    cached inside the payload: they are overlaid live from their caches (and
+    re-validated against the current payload fingerprint), so a freshly
+    generated result is visible immediately and a stale one is correctly
+    reported as not-ready."""
     from backend.crm import cache as store
     con = _connect()
     try:
@@ -470,7 +471,9 @@ def customer_360(customer_id: str) -> dict[str, Any] | None:
     if payload is None or not payload.get("customer"):
         return None
 
-    # Live summary overlay (fingerprint-validated against THIS payload).
+    # Live LLM overlays (fingerprint-validated against THIS payload): the
+    # summary and the «اقدام بعدی» share the same snapshot fingerprint, so they
+    # invalidate together and a plain read never triggers generation.
     from backend.agents import intel_summary
     snapshot = intel_summary._customer_snapshot(payload)
     sum_fp = store.fingerprint(snapshot)
@@ -481,6 +484,13 @@ def customer_360(customer_id: str) -> dict[str, Any] | None:
     else:
         payload["summary"] = None
         payload["summaryReady"] = False
+    na_entry = store.load("customer_next_action", customer_id)
+    if na_entry is not None and na_entry.get("fingerprint") == sum_fp:
+        payload["nextAction"] = na_entry["value"]
+        payload["nextActionReady"] = True
+    else:
+        payload["nextAction"] = None
+        payload["nextActionReady"] = False
     return payload
 
 
@@ -532,11 +542,14 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
 
         # ---- deterministic engine: signals / state / reasons / actions ----
         from backend.crm.labels import (
+            ACTION_CATEGORY_FA,
             SIGNAL_FA, action_name, action_next_step, status_fa,
             translate_reason, translate_reasons,
         )
         from backend.crm.service import service
-        ci = service.get_intelligence(customer_id)
+        # Surface the full ranked recommendation set (all eligible actions,
+        # grouped by category in the UI) — not only the top-3.
+        ci = service.get_intelligence(customer_id, limit=10)
         engine_signals = [
             {
                 "id": sig_id,
@@ -554,12 +567,29 @@ def _customer_360_compute(customer_id: str) -> dict[str, Any]:
             {
                 "id": a.action_id,
                 "name": action_name(a.action_id, a.name),
+                "category": a.category,
+                "categoryLabel": ACTION_CATEGORY_FA.get(a.category, a.category),
+                "priority": a.priority,
                 "reason": translate_reason(a.reason),
                 "evidence": translate_reasons(a.evidence[:2]),
                 "next_step": action_next_step(a.action_id, a.suggested_next_step),
             }
-            for a in ci.next_best_actions[:6]
+            for a in ci.next_best_actions[:10]
+            if a.action_id != "NO_ACTION"
         ]
+        # If nothing actionable was eligible, the engine's fallback
+        # (monitor-only) is the honest answer — keep it then.
+        if not actions:
+            actions = [{
+                "id": "NO_ACTION",
+                "name": "فقط پایش",
+                "category": "attention",
+                "categoryLabel": ACTION_CATEGORY_FA.get("attention", "attention"),
+                "priority": 0.0,
+                "reason": "اقدام پیشنهادی خاصی از سیگنال‌های مشتری لازم نیست",
+                "evidence": [],
+                "next_step": "وضعیت مشتری را در بازبینی بعدی پایش کنید.",
+            }]
         state_dims = {}
         if ci.state:
             for dim in ("value", "churn_risk", "growth_opportunity",

@@ -27,7 +27,8 @@ def _reason(action, signals: dict[str, CustomerSignal]) -> str:
 
 def recommend(signals: dict[str, CustomerSignal],
               state: CustomerState,
-              data_quality: float) -> list[RecommendedAction]:
+              data_quality: float,
+              limit: int | None = None) -> list[RecommendedAction]:
     eligible: list = []
     blocked_by_forbidden: dict[str, list[str]] = {}
 
@@ -49,7 +50,7 @@ def recommend(signals: dict[str, CustomerSignal],
         ranked.append((priority, confidence, action))
 
     ranked.sort(key=lambda t: (-t[0], t[2].action_id))
-    top = ranked[:MAX_ACTIONS]
+    top = ranked[: limit if limit is not None else MAX_ACTIONS]
 
     out: list[RecommendedAction] = []
     for priority, confidence, action in top:
@@ -62,6 +63,7 @@ def recommend(signals: dict[str, CustomerSignal],
         out.append(RecommendedAction(
             action_id=action.action_id,
             name=action.name,
+            category=action.category,
             priority=priority,
             confidence=confidence,
             reason=_reason(action, signals),

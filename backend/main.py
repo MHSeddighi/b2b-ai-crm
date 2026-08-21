@@ -130,6 +130,18 @@ async def customer_360_summary(customer_id: str,
     return await intel_summary.customer_summary(payload, refresh=refresh)
 
 
+@app.get("/api/customers/{customer_id}/360/next-action")
+async def customer_360_next_action(customer_id: str,
+                                   refresh: bool = False) -> dict[str, Any]:
+    """LLM-generated «اقدام بعدی» for one customer, built from the engine's
+    signals/state/actions (cached by data fingerprint; refresh=1 regenerates)."""
+    from backend.agents import intel_summary
+    payload = api_data.customer_360(customer_id)
+    if payload is None:
+        return {"status": "not_found", "nextAction": None, "generated": False}
+    return await intel_summary.customer_next_action(payload, refresh=refresh)
+
+
 # --- Deterministic Customer Intelligence (Signal -> State -> Action) ---
 @app.get("/api/customers/{customer_id}/intelligence")
 async def customer_intelligence(customer_id: str) -> dict[str, Any]:

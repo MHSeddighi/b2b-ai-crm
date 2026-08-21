@@ -24,7 +24,8 @@ class CustomerIntelligenceService:
         self.engine = engine or SignalEngine()
 
     # ------------------------------------------------------------------ core
-    def get_intelligence(self, customer_id: str) -> CustomerIntelligence:
+    def get_intelligence(self, customer_id: str,
+                         limit: int | None = None) -> CustomerIntelligence:
         con = data.connect()
         try:
             if not data.customer_exists(con, customer_id):
@@ -37,7 +38,7 @@ class CustomerIntelligenceService:
         state = build_state(customer_id, signals)
         reasons = build_reasons(signals)
         quality = self._data_quality(signals)
-        actions = recommend(signals, state, quality.overall)
+        actions = recommend(signals, state, quality.overall, limit=limit)
 
         return CustomerIntelligence(
             customer_id=customer_id,
